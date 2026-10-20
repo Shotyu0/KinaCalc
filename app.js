@@ -158,7 +158,7 @@
   }
 
   // auth: 'off' (no Firebase config) | 'pending' | 'out' | 'notmember' | 'member'. role: what this person may change.
-  const S = { items: new Map(), recipes: new Map(), settings: mergeSettings(null), ready: false, mode: 'pending', auth: 'pending', role: 'owner', email: null, uid: null, mine: null };
+  const S = { items: new Map(), recipes: new Map(), settings: mergeSettings(null), ready: false, mode: 'pending', auth: 'pending', role: 'owner', email: null, uid: null, mine: null, myGather: null };
   // The owner manages recipes, settings and deleting items; members update prices and their own levels.
   function canManage() { return S.mode !== 'db' || S.role === 'owner'; }
   // Your crafting levels: your own copy when the page knows who you are, otherwise the shared settings.
@@ -166,9 +166,47 @@
   function setLevel(p, total) {
     const lv = Object.assign({}, myLevels());
     if (total == null) delete lv[p]; else lv[p] = total;
-    if (S.uid && DB) { S.mine = lv; dbWrite('users/' + S.uid, { levels: lv }); }
+    if (S.uid && DB) { S.mine = lv; writePrefs(); }
     else Store.putSettings(Object.assign({}, S.settings, { levels: lv }));
   }
+  // Which items you gather yourself. In the shared price book everyone keeps their own list; the
+  // owner starts from the marks made before gathering became personal. In this browser alone, the
+  // item's own flag is used.
+  const NO_GATHER = new Set();
+  let gatherSeed = { v: -1, set: NO_GATHER };
+  function myGather() {
+    if (!S.uid) return null;
+    if (S.myGather) return S.myGather;
+    if (S.role !== 'owner') return NO_GATHER;
+    if (gatherSeed.v !== itemsVer) {
+      const seed = new Set();
+      for (const it of S.items.values()) if (it.gather) seed.add(it.id);
+      gatherSeed = { v: itemsVer, set: seed };
+    }
+    return gatherSeed.set;
+  }
+  function isGathered(it) {
+    if (!it) return false;
+    const mine = myGather();
+    return mine ? mine.has(it.id) : !!it.gather;
+  }
+  function setGather(ids, on) {
+    if (S.uid && DB) {
+      const next = new Set(myGather());
+      for (const id of ids) { if (on) next.add(id); else next.delete(id); }
+      S.myGather = next; itemsVer++;
+      writePrefs();
+      return;
+    }
+    for (const id of ids) {
+      const it = getItem(id);
+      if (!it) continue;
+      const next = Object.assign({}, it, { gather: on, example: false });
+      delete next.virtual;
+      Store.putItem(next);
+    }
+  }
+  function writePrefs() { if (S.uid && DB) dbWrite('users/' + S.uid, { levels: myLevels(), gather: [...myGather()] }); }
   const UI = Object.assign({
     tab: 'rank', goal: 'normal', metric: 'buy', per: 'kina', prof: 'all', open: null, crafts: '1', wanted: '1', planGather: true,
     priceQuery: '', priceSort: 'name', priceFilter: 'all', priceShow: 100, priceOpen: null,
@@ -260,7 +298,7 @@
       for (const [id, list] of makers) {
         if (unavail.has(id)) continue;
         const it = S.items.get(id) || REG.virt.get(id);
-        const known = it && (num(it.price) > 0 || num(it.vendor) > 0 || it.gather);
+        const known = it && (num(it.price) > 0 || num(it.vendor) > 0 || isGathered(it));
         if (!known && list.every(r => blocked.has(r.id) || r.pending)) { unavail.add(id); changed = true; }
       }
     }
@@ -436,7 +474,7 @@
       const it = getItem(id);
       const opts = [];
       if (it) {
-        if (scn !== 'buy' && it.gather) opts.push({ route: 'gather', cost: scn === 'gather' ? 0 : (netSell(id) || 0) });
+        if (scn !== 'buy' && isGathered(it)) opts.push({ route: 'gather', cost: scn === 'gather' ? 0 : (netSell(id) || 0) });
         const p = num(it.price); if (p > 0 && !it.bound) opts.push({ route: 'buy', cost: p });
         const v = num(it.vendor); if (v > 0) opts.push({ route: 'vendor', cost: v });
       }
@@ -1100,7 +1138,7 @@
     let items = UI.priceFilter === 'out' ? allItems().filter(it => it.unavailable) : allItems().filter(it => !it.virtual || used.has(it.id));
     if (UI.priceFilter === 'priced') items = items.filter(it => num(it.price) > 0 || num(it.vendor) > 0);
     else if (UI.priceFilter === 'needs') items = items.filter(it => needsPrice(it, used, C, outputs));
-    else if (UI.priceFilter === 'gather') items = items.filter(it => it.gather);
+    else if (UI.priceFilter === 'gather') items = items.filter(isGathered);
     if (q) items = items.filter(it => loose(it.name).indexOf(q) >= 0);
     const byName = (a, b) => a.name.localeCompare(b.name);
     if (UI.priceSort === 'stale') items.sort((a, b) => ((a.updatedAt || 0) - (b.updatedAt || 0)) || byName(a, b));
@@ -1115,7 +1153,7 @@
     const items = priceItems(used, C, outputs);
     const now = Date.now();
     let h = '<div class="toolbar"><h2 class="sec-h">Prices</h2><div class="row-gap"><button class="btn" data-act="tab" data-tab="shots">Paste a price list</button></div></div>' +
-      '<p class="help">Enter the lowest market price for one unit. You can type 1520, 1,520 or 1.5k. Every price you enter or paste is kept, so click an item’s name to see its price history. Tick <strong>Gather</strong> for anything you collect yourself, and <strong>Bound</strong> for items that can’t be sold on the market. Use the NPC column for vendor-only materials.</p>';
+      '<p class="help">Enter the lowest market price for one unit. You can type 1520, 1,520 or 1.5k. Every price you enter or paste is kept, so click an item’s name to see its price history. Tick <strong>Gather</strong> for anything you collect yourself' + (S.uid ? ' (your own list: friends tick theirs)' : '') + ', and <strong>Bound</strong> for items that can’t be sold on the market. Use the NPC column for vendor-only materials.</p>';
     h += '<section class="panel"><div class="addrow">' +
       '<input id="ni-name" class="in" list="dl-items" placeholder="New item name" value="' + esc(UI.newItem.name) + '" data-inp="ni" data-k="name" aria-label="New item name" autocomplete="off">' +
       '<input id="ni-price" class="in num" inputmode="decimal" placeholder="Market price" value="' + esc(UI.newItem.price) + '" data-inp="ni" data-k="price" aria-label="New item market price">' +
@@ -1145,7 +1183,7 @@
         '<td class="num"><input id="pi-price-' + id + '" class="cell-in num" inputmode="decimal" value="' + (it.price != null ? NF0.format(it.price) : '') + '" placeholder="—" data-chg="item" data-id="' + id + '" data-f="price" aria-label="Market price of ' + esc(it.name) + '"' + (it.bound ? ' disabled title="Bound items can’t be sold on the market"' : '') + '></td>' +
         '<td>' + sparkHTML(it) + '</td>' +
         '<td class="num"><input id="pi-vendor-' + id + '" class="cell-in num" inputmode="decimal" value="' + (it.vendor != null ? NF0.format(it.vendor) : '') + '" placeholder="—" data-chg="item" data-id="' + id + '" data-f="vendor" aria-label="NPC price of ' + esc(it.name) + '"></td>' +
-        '<td class="c"><input type="checkbox" class="check" id="pi-gather-' + id + '" data-chg="item" data-id="' + id + '" data-f="gather"' + (it.gather ? ' checked' : '') + ' aria-label="I gather ' + esc(it.name) + '"></td>' +
+        '<td class="c"><input type="checkbox" class="check" id="pi-gather-' + id + '" data-chg="item" data-id="' + id + '" data-f="gather"' + (isGathered(it) ? ' checked' : '') + ' aria-label="I gather ' + esc(it.name) + '"></td>' +
         '<td class="c"><input type="checkbox" class="check" id="pi-bound-' + id + '" data-chg="item" data-id="' + id + '" data-f="bound"' + (it.bound ? ' checked' : '') + ' aria-label="' + esc(it.name) + ' is bound"></td>' +
         '<td class="num">' + u + '</td>' +
         '<td class="when">' + ago(it.updatedAt) + (isStale ? ' <span class="tag warn">Old</span>' : '') + '</td>' +
@@ -1506,8 +1544,9 @@
     const p = UI.newItem.price.trim() ? num(UI.newItem.price) : null;
     if (UI.newItem.price.trim() && !(p >= 0)) { toast('Enter a price like 1520, 1,520 or 1.5k.'); return; }
     const base = found || { id: S.items.has(slugId(name)) ? uid('i') : slugId(name), name: name, price: null, vendor: null, gather: false, bound: /\(bound\)/i.test(name), updatedAt: null, hist: [] };
-    const it = withPrice(Object.assign({}, base, { gather: !!UI.newItem.gather }), p);
+    const it = withPrice(Object.assign({}, base, S.uid ? {} : { gather: !!UI.newItem.gather }), p);
     Store.putItem(it);
+    if (S.uid && UI.newItem.gather) setGather([it.id], true);
     UI.newItem = { name: '', price: '', gather: UI.newItem.gather };
     toast((found ? 'Priced ' : 'Added ') + it.name + '.');
     render();
@@ -1525,13 +1564,14 @@
     let d;
     try { d = JSON.parse(text); } catch (_) { return 'That isn’t valid JSON. Paste the whole export, from the first { to the last }.'; }
     if (!d || !Array.isArray(d.items) || !Array.isArray(d.recipes)) return 'That doesn’t look like a Kina Ledger export.';
-    const idMap = new Map();
+    const idMap = new Map(), gathered = [];
     let ni = 0, nr = 0;
     for (const raw of d.items) {
       if (!raw || typeof raw !== 'object') continue;
       const x = readItem(String(raw.id || ''), raw);
       if (!x.name) continue;
       const ex = findItem(x.name);
+      if (x.gather) gathered.push(ex ? ex.id : null);
       if (ex) {
         idMap.set(x.id, ex.id);
         const seen = new Set(), hist = [];
@@ -1545,6 +1585,7 @@
         const id = ID_RE.test(x.id) && !S.items.has(x.id) ? x.id : uid('i');
         idMap.set(x.id, id);
         Store.putItem(Object.assign({}, x, { id: id }));
+        if (x.gather) gathered[gathered.length - 1] = id;
         ni++;
       }
     }
@@ -1564,6 +1605,8 @@
     if (d.settings) Store.putSettings(mergeSettings(d.settings));
     const lv = readLevels(d.myLevels);
     for (const p of Object.keys(lv)) setLevel(p, lv[p]);
+    if (Array.isArray(d.myGather)) for (const id of d.myGather) gathered.push(idMap.get(String(id)) || null);
+    if (S.uid) setGather(gathered.filter(Boolean), true);
     return 'Imported ' + plural(ni, 'new item') + ' and ' + plural(nr, 'recipe') + '.';
   }
 
@@ -1645,7 +1688,7 @@
     'paste-clear': () => { UI.shots.pasteText = ''; UI.shots.pasteNote = ''; if (UI.shots.source === 'paste') UI.shots.market = null; render(); },
     'shot-discard': () => { UI.shots.market = null; UI.shots.error = ''; render(); },
     'shot-apply': () => applyMarket(),
-    'io-export': () => { UI.io.exportText = JSON.stringify({ app: 'kina-ledger', version: 3, exportedAt: new Date().toISOString(), settings: S.settings, myLevels: myLevels(), items: [...S.items.values()], recipes: [...S.recipes.values()] }, null, 2); render(); },
+    'io-export': () => { UI.io.exportText = JSON.stringify({ app: 'kina-ledger', version: 3, exportedAt: new Date().toISOString(), settings: S.settings, myLevels: myLevels(), myGather: S.uid ? [...myGather()] : null, items: [...S.items.values()], recipes: [...S.recipes.values()] }, null, 2); render(); },
     'io-hide': () => { UI.io.exportText = ''; render(); },
     'io-copy': () => {
       const fallback = () => { const ta = document.getElementById('io-out'); if (ta) { ta.focus(); ta.select(); } toast('Press Ctrl+C to copy the selected text.'); };
@@ -1665,7 +1708,8 @@
         if (raw !== '' && (v == null || v < 0)) { toast('Enter a price like 1520, 1,520 or 1.5k.'); t.value = it[f] != null ? NF0.format(it[f]) : ''; return; }
         if (v === it[f]) { t.value = v != null ? NF0.format(v) : ''; return; }
         next = f === 'price' ? withPrice(it, v) : Object.assign({}, it, { vendor: v, example: false });
-      } else if (f === 'gather' || f === 'bound' || f === 'unavailable') next = Object.assign({}, it, { [f]: t.checked, example: false });
+      } else if (f === 'gather') { setGather([it.id], t.checked); later(); return; }
+      else if (f === 'bound' || f === 'unavailable') next = Object.assign({}, it, { [f]: t.checked, example: false });
       if (!next) return;
       delete next.virtual;
       Store.putItem(next); later();
@@ -1776,7 +1820,7 @@
   function useLocal() {
     for (const stop of unsubs) stop();
     unsubs = [];
-    DB = null; S.mode = 'local'; S.role = 'owner'; S.uid = null; S.mine = null;
+    DB = null; S.mode = 'local'; S.role = 'owner'; S.uid = null; S.mine = null; S.myGather = null;
     S.items = new Map(); S.recipes = new Map(); S.settings = mergeSettings(null);
     loadLocal();
     itemsVer++; recipesVer++;
@@ -1794,13 +1838,15 @@
     for (const stop of unsubs) stop();
     unsubs = [];
     S.auth = 'member'; S.role = member.role === 'owner' ? 'owner' : 'member';
-    DB = fs; S.mode = 'db'; S.uid = user.uid; S.mine = null; S.ready = false;
+    DB = fs; S.mode = 'db'; S.uid = user.uid; S.mine = null; S.myGather = null; S.ready = false;
     S.items = new Map(); S.recipes = new Map();
     render();
     subscribe();
     unsubs.push(DB.doc('users/' + user.uid).onSnapshot(d => {
       const x = d.exists ? d.data() : null;
       S.mine = readLevels(x && x.levels);
+      S.myGather = x && Array.isArray(x.gather) ? new Set(x.gather.filter(v => typeof v === 'string')) : null;
+      itemsVer++;
       scheduleRender();
     }, () => {}));
   }
