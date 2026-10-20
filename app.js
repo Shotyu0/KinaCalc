@@ -140,7 +140,7 @@
     }
     return s;
   }
-  const UI_KEYS = { tab: 's', goal: 's', metric: 's', per: 's', prof: 's', crafts: 's', wanted: 's', planGather: 'b', priceSort: 's', priceFilter: 's', rankAll: 'b', canCraft: 'b', recProf: 's', recSrc: 's' };
+  const UI_KEYS = { tab: 's', goal: 's', metric: 's', per: 's', prof: 's', crafts: 's', wanted: 's', planGather: 'b', priceSort: 's', priceFilter: 's', rankAll: 'b', canCraft: 'b', recProf: 's', recSrc: 's', budget: 's', affordOnly: 'b' };
   function readUI() {
     try {
       const x = JSON.parse(localStorage.getItem(LS_UI) || '{}') || {};
@@ -211,7 +211,7 @@
     tab: 'rank', goal: 'normal', metric: 'buy', per: 'kina', prof: 'all', open: null, crafts: '1', wanted: '1', planGather: true,
     priceQuery: '', priceSort: 'name', priceFilter: 'all', priceShow: 100, priceOpen: null,
     rankQ: '', rankAll: false, canCraft: false, rankShow: PAGE,
-    recQ: '', recProf: 'all', recSrc: 'all', recShow: PAGE
+    recQ: '', recProf: 'all', recSrc: 'all', recShow: PAGE, budget: '', affordOnly: false
   }, readUI());
   UI.editor = null; UI.editorErr = []; UI.editorFrom = 'recipes';
   UI.shots = { status: 'idle', market: null, source: null, pasteText: '', pasteNote: '' };
@@ -597,7 +597,89 @@
     }
     return { E: E, rows: rows, comboRows: comboRows, prod: prod };
   }
-  function metricVal(row) { const x = row[UI.metric]; return UI.per === 'roi' ? x.roi : x.profit; }
+  /* ---------- risk and budget ---------- */
+  // The ways one craft can turn out, each with its chance and the Kina you end up with
+  // relative to what you put in (materials and fee).
+  function outcomesOf(rc) {
+    const mats = isFinite(rc.matCost) ? rc.matCost : NaN;
+    const stake = mats + rc.fee;
+    const normal = rc.outNet == null ? NaN : rc.outNet * rc.outQty;
+    const comboUnit = rc.sameCombo ? rc.outNet : rc.comboNet;
+    const comboVal = (comboUnit == null ? 0 : comboUnit * rc.comboQty) + (rc.r.comboAdds || rc.extraCombo ? normal : 0) -
+      (rc.extraCombo ? rc.comboMatCost * rc.consumeC : 0);
+    const list = [
+      { label: 'Fails', p: 1 - rc.pS, kina: -(rc.fee + mats * rc.loss) },
+      { label: 'Normal ' + itemName(rc.r.output), p: rc.pS - rc.pCombo, kina: normal - stake }
+    ];
+    if (rc.pCombo > 0) list.push({ label: rc.sameCombo ? 'Combo: an extra batch' : itemName(rc.comboId), p: rc.pCombo, kina: comboVal - stake, combo: true });
+    const ev = list.reduce((s, o) => s + o.p * o.kina, 0);
+    const lose = list.reduce((s, o) => s + (o.kina < 0 ? o.p : 0), 0);
+    return { stake: stake, list: list, ev: ev, lose: lose };
+  }
+  const LOGF = [0];
+  function logFact(n) { for (let i = LOGF.length; i <= n; i++) LOGF[i] = LOGF[i - 1] + Math.log(i); return LOGF[n]; }
+  function normalCdf(z) {
+    const t = 1 / (1 + 0.2316419 * Math.abs(z)), d = 0.3989423 * Math.exp(-z * z / 2);
+    const tail = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+    return z > 0 ? 1 - tail : tail;
+  }
+  // Chance that n crafts in a row end with more Kina than they started. Exact for up to 80 crafts,
+  // a normal approximation beyond that.
+  function chanceAhead(list, n) {
+    const ps = list.map(o => o.p), ks = list.map(o => o.kina);
+    while (ps.length < 3) { ps.push(0); ks.push(0); }
+    if (n <= 80) {
+      const lp = ps.map(p => p > 0 ? Math.log(p) : -Infinity);
+      let sum = 0;
+      for (let c = 0; c <= n; c++) {
+        for (let b = 0; b <= n - c; b++) {
+          const a = n - b - c;
+          if (a * ks[0] + b * ks[1] + c * ks[2] <= 0) continue;
+          const lw = logFact(n) - logFact(a) - logFact(b) - logFact(c) + (a ? a * lp[0] : 0) + (b ? b * lp[1] : 0) + (c ? c * lp[2] : 0);
+          if (lw > -700) sum += Math.exp(lw);
+        }
+      }
+      return Math.min(1, sum);
+    }
+    const mean = list.reduce((s, o) => s + o.p * o.kina, 0);
+    const spread = list.reduce((s, o) => s + o.p * o.kina * o.kina, 0) - mean * mean;
+    return spread > 0 ? normalCdf(n * mean / Math.sqrt(n * spread)) : (mean > 0 ? 1 : 0);
+  }
+  // Spending a whole budget on one recipe, one craft after another, without reinvesting what you sell.
+  const budgetCache = new WeakMap();
+  function budgetOf(rc, budget) {
+    if (!(budget > 0) || !rc) return null;
+    const hit = budgetCache.get(rc);
+    if (hit && hit.budget === budget) return hit.val;
+    const o = outcomesOf(rc);
+    let val = null;
+    if (isFinite(o.ev)) {
+      if (!(o.stake > 0)) val = { o: o, free: true, n: null, total: o.ev };
+      else {
+        const n = Math.min(100000, Math.floor(budget / o.stake));
+        val = {
+          o: o, free: false, n: n, total: n * o.ev,
+          ahead: n ? chanceAhead(o.list, n) : NaN,
+          anyCombo: n && rc.pCombo > 0 ? 1 - Math.pow(1 - rc.pCombo, n) : NaN,
+          worst: n ? n * Math.min.apply(null, o.list.map(x => x.kina)) : NaN
+        };
+      }
+    }
+    budgetCache.set(rc, { budget: budget, val: val });
+    return val;
+  }
+  function rcOf(x) { return x && x.kind === 'combo' ? x.rc : x; }
+  function myBudget() { const b = num(UI.budget); return b > 0 ? b : 0; }
+  function metricVal(row) {
+    const x = row[UI.metric];
+    if (UI.per === 'roi') return x.roi;
+    if (UI.per === 'budget' && myBudget()) {
+      const bd = budgetOf(rcOf(x), myBudget());
+      if (!bd) return x.profit;
+      return bd.free || bd.n ? bd.total : -1e15 + (isFinite(x.profit) ? x.profit : 0); // over budget sorts last
+    }
+    return x.profit;
+  }
   function sortKey(row) { const v = metricVal(row); return Number.isNaN(v) || v == null ? -Infinity : v; }
   // Items whose missing price blocks the most recipes from being ranked (only recipes your levels allow, once levels are set).
   function neededPrices(C) {
@@ -663,6 +745,8 @@
     if (r.src === 'edited') f.push(['', 'Edited']);
     if (r.src === 'mine') f.push(['', 'My recipe']);
     if (b.sr.src === 'low') f.push(['loss', 'Needs ' + lvTxt(r.level)]);
+    const bd = budgetOf(rcOf(row[UI.metric]), myBudget());
+    if (bd && !bd.free && !bd.n) f.push(['loss', 'Over budget']);
     if (out && out.bound) f.push(['', 'Ingredient only']);
     else if (b.outNet == null) f.push(['warn', 'Needs sell price']);
     if (b.comboMissing) f.push(['warn', 'Needs combo item price']);
@@ -693,6 +777,9 @@
     }
     const combo = UI.goal === 'combo';
     const pool = combo ? C.comboRows : C.rows;
+    const B = myBudget();
+    if (UI.per === 'budget' && !B) UI.per = 'kina';
+    const affordable = x => { const bd = budgetOf(rcOf(x[UI.metric]), B); return !bd || bd.free || bd.n > 0; };
     const profs = [];
     for (const x of pool) if (x.r.profession && profs.indexOf(x.r.profession) < 0) profs.push(x.r.profession);
     const pi = p => { const i = PROFESSIONS.indexOf(p); return i < 0 ? 99 : i; };
@@ -703,7 +790,8 @@
     let rows = pool.filter(x =>
       (UI.prof === 'all' || x.r.profession === UI.prof) &&
       (!q || loose(itemName(x.r.output)).indexOf(q) >= 0) &&
-      (!UI.canCraft || canCraft(x.r)));
+      (!UI.canCraft || canCraft(x.r)) &&
+      (!UI.affordOnly || !B || affordable(x)));
     const rankable = rows.filter(x => sortKey(x) > -Infinity);
     const hidden = rows.length - rankable.length;
     if (!UI.rankAll) rows = rankable;
@@ -721,12 +809,16 @@
       Object.keys(METRIC).map(m => '<button data-act="metric" data-m="' + m + '" aria-pressed="' + (UI.metric === m) + '">' + METRIC[m].short + '</button>').join('') +
       '</div></div><div class="seg" role="group" aria-label="Show as">' +
       '<button data-act="per" data-v="kina" aria-pressed="' + (UI.per === 'kina') + '">Kina</button>' +
-      '<button data-act="per" data-v="roi" aria-pressed="' + (UI.per === 'roi') + '">ROI %</button></div></div>';
+      '<button data-act="per" data-v="roi" aria-pressed="' + (UI.per === 'roi') + '">ROI %</button>' +
+      (B ? '<button data-act="per" data-v="budget" aria-pressed="' + (UI.per === 'budget') + '">With my budget</button>' : '') + '</div></div>';
     h += '<p class="help">' + (combo
       ? 'Each row is one Splendent item: what it costs to get by crafting its base item until it procs, after selling the normal items made along the way, and what it sells for after the ' + k(S.settings.tax) + '% fee. Open a row to see what it crafts if you keep it. Recipes that need a Splendent use this cost whenever making one is cheaper than buying it. ' + esc(METRIC[UI.metric].hint)
-      : esc(METRIC[UI.metric].hint) + ' All figures are expected values per craft attempt, after the ' + k(S.settings.tax) + '% market fee. Click a row for the breakdown.') + '</p>';
+      : esc(METRIC[UI.metric].hint) + ' All figures are expected values per craft attempt, after the ' + k(S.settings.tax) + '% market fee. Click a row for the breakdown.') +
+      (UI.per === 'budget' ? ' <strong>With my budget</strong> shows the profit you’d expect from spending your whole budget on that craft, one craft after another without reinvesting, and your chance to finish ahead.' : '') + '</p>';
     h += '<div class="filters"><div class="field"><label for="rq">Find a recipe</label><input id="rq" class="in" type="search" value="' + esc(UI.rankQ) + '" data-inp="rq" placeholder="e.g. Orb, Tea, Longsword" autocomplete="off"></div>' +
+      '<div class="field budget"><label for="budget">My budget (Kina)</label><input id="budget" class="in num" inputmode="decimal" value="' + esc(UI.budget) + '" data-chg="budget" placeholder="e.g. 10m" autocomplete="off"></div>' +
       '<label class="check"><input type="checkbox" id="rk-craft" data-chg="rk-craft"' + (UI.canCraft ? ' checked' : '') + '> Only what my levels can craft</label>' +
+      '<label class="check"><input type="checkbox" id="rk-afford" data-chg="rk-afford"' + (UI.affordOnly ? ' checked' : '') + (B ? '' : ' disabled') + '> Only what my budget covers</label>' +
       '<label class="check"><input type="checkbox" id="rk-all" data-chg="rk-all"' + (UI.rankAll ? ' checked' : '') + '> Include recipes still missing prices' + (hidden ? ' <span class="muted">(' + NF0.format(hidden) + ')</span>' : '') + '</label></div>';
     if (profs.length > 1) {
       h += '<div class="chips" role="group" aria-label="Profession">' +
@@ -764,10 +856,18 @@
   }
   function moneyCell(rc, m, label) {
     const ok = isFinite(rc.profit);
-    const big = UI.per === 'roi' ? roiTxt(rc.roi) : sk(rc.profit);
-    const small = UI.per === 'roi' ? sk(rc.profit) + ' Kina' : 'ROI ' + roiTxt(rc.roi);
+    let big = UI.per === 'roi' ? roiTxt(rc.roi) : sk(rc.profit);
+    let small = UI.per === 'roi' ? sk(rc.profit) + ' Kina' : 'ROI ' + roiTxt(rc.roi);
+    let value = rc.profit;
+    const bd = UI.per === 'budget' ? budgetOf(rcOf(rc), myBudget()) : null;
+    if (ok && bd) {
+      value = bd.total;
+      if (bd.free) { big = sk(bd.total); small = 'costs no Kina'; }
+      else if (!bd.n) { big = '—'; small = 'over budget'; value = NaN; }
+      else { big = sk(bd.total); small = NF0.format(bd.n) + ' crafts · ' + pct(bd.ahead, 0) + ' ahead'; }
+    }
     const why = rc.outNet == null ? 'no sell price' : rc.missing.length ? 'missing prices' : '';
-    return '<td class="num' + (UI.metric === m ? ' is-sort' : '') + '" data-label="' + label + '"><div class="v ' + tone(rc.profit) + '">' + (ok ? big : '—') + '</div><div class="sub">' + (ok ? small : why) + '</div></td>';
+    return '<td class="num' + (UI.metric === m ? ' is-sort' : '') + '" data-label="' + label + '"><div class="v ' + tone(value) + '">' + (ok ? big : '—') + '</div><div class="sub">' + (ok ? small : why) + '</div></td>';
   }
   function leadHTML(C, rankable) {
     let priced = 0, stale = 0;
@@ -791,6 +891,14 @@
         '<p class="help">A recipe is ranked once its result and every material has a price. Pasting a price list from aion2.exchange on the Import tab is the fastest way to fill these in.</p>' + needHTML + '</div>' + stats + '</section>';
     }
     const rc = best[UI.metric];
+    const bd = UI.per === 'budget' ? budgetOf(rcOf(rc), myBudget()) : null;
+    if (bd && bd.n) {
+      return '<section class="lead"><div class="lead-main"><span class="eyebrow">' + (bd.total > 0 ? 'Best use of your ' + compact(myBudget()) + ' budget' : 'Nothing your budget covers turns a profit') + ' · ' + METRIC[UI.metric].short + '</span>' +
+        '<h2 class="lead-name">' + esc(itemName(best.r.output)) + '</h2>' +
+        '<div class="lead-figs"><span class="big ' + tone(bd.total) + '">' + sk(bd.total) + '</span><span>Kina expected from ' + plural(bd.n, 'craft') + '</span><span class="sep">|</span><span>' + pct(bd.ahead) + ' chance to finish ahead</span>' +
+        (isFinite(bd.anyCombo) ? '<span class="sep">|</span><span>' + pct(bd.anyCombo) + ' chance of a combo</span>' : '') + '</div>' +
+        tagList(rowFlags(best)) + needHTML + '</div>' + stats + '</section>';
+    }
     const positive = rc.profit > 0;
     return '<section class="lead"><div class="lead-main"><span class="eyebrow">' + (positive ? 'Most profitable right now' : 'Nothing turns a profit right now') + ' · ' + METRIC[UI.metric].short + '</span>' +
       '<h2 class="lead-name">' + esc(itemName(best.r.output)) + '</h2>' +
@@ -798,6 +906,32 @@
       tagList(rowFlags(best)) + needHTML + '</div>' + stats + '</section>';
   }
 
+  // A tick box for "I gather this" next to a material, for anything not crafted.
+  function gatherBox(id, route) {
+    if (route === 'craft' || route === 'combo') return '';
+    return '<input type="checkbox" class="check" data-chg="gather-toggle" data-id="' + esc(id) + '"' + (isGathered(getItem(id)) ? ' checked' : '') +
+      ' aria-label="I gather ' + esc(itemName(id)) + '" title="I gather this myself">';
+  }
+  // What one craft can turn into, and what spending your budget on it looks like.
+  function riskHTML(rc) {
+    const o = outcomesOf(rc), B = myBudget();
+    if (!isFinite(o.ev)) return '<p class="help">Add the missing prices to see what a craft can turn into.</p>';
+    let h = '<div class="mini-well"><table class="mini"><thead><tr><th>One craft</th><th class="num">Chance</th><th class="num">You end up</th></tr></thead><tbody>' +
+      o.list.map(x => '<tr><td>' + esc(x.label) + '</td><td class="num">' + pct(x.p) + '</td><td class="num ' + tone(x.kina) + '">' + sk(x.kina) + '</td></tr>').join('') +
+      '<tr><td><strong>Average</strong></td><td></td><td class="num ' + tone(o.ev) + '"><strong>' + sk(o.ev) + '</strong></td></tr></tbody></table></div>' +
+      '<p class="note">Each craft puts ' + k(o.stake) + ' Kina of materials and fees on the line, and loses Kina ' + pct(o.lose) + ' of the time.</p>';
+    if (!B) return h + '<p class="help">Enter your budget above the rankings to see how many crafts it covers and your chance to finish ahead.</p>';
+    const bd = budgetOf(rc, B);
+    if (bd.free) return h + '<p class="note">With your current choices this craft costs no Kina, so your budget doesn’t limit it.</p>';
+    if (!bd.n) return h + '<p class="note loss">One craft costs ' + k(o.stake) + ', more than your ' + k(B) + ' budget.</p>';
+    const combo = o.list.find(x => x.combo);
+    return h + '<dl class="kv tot"><dt>Crafts your ' + compact(B) + ' covers</dt><dd>' + NF0.format(bd.n) + '</dd>' +
+      '<dt>Expected profit</dt><dd class="' + tone(bd.total) + '"><strong>' + sk(bd.total) + '</strong></dd>' +
+      '<dt>Chance to finish ahead</dt><dd>' + pct(bd.ahead) + '</dd>' +
+      (combo && isFinite(bd.anyCombo) ? '<dt>Chance of at least one ' + esc(combo.label) + '</dt><dd>' + pct(bd.anyCombo) + '</dd>' : '') +
+      '<dt>Worst case</dt><dd class="loss">' + sk(bd.worst) + '</dd></dl>' +
+      '<p class="note">Assumes you spend the budget one craft after another without reinvesting what you sell.</p>';
+  }
   // A Splendent row: the cost to get one through combos, and whether to sell it or craft with it.
   function comboDetailHTML(C, row) {
     const scn = UI.metric, E = C.E[scn], ch = row[scn], rc = ch.rc, base = rc.r;
@@ -810,7 +944,7 @@
       '<dt>Crafts per Splendent</dt><dd>≈ ' + qfmt(tries) + '</dd>' +
       '<dt>Normal items along the way</dt><dd>≈ ' + qfmt(rc.pBase * rc.outQty * tries) + '</dd><dd class="why">' +
       (ch.baseNet != null ? esc(baseName) + ' sold at ' + k(ch.baseNet) + ' each after the fee.' : esc(baseName) + ' has no market price, so they count as 0. Add its price to lower the cost.') + '</dd></dl>';
-    const mats = '<div class="mini-well"><table class="mini"><thead><tr><th>Material</th><th class="num">Qty</th><th>Source</th><th class="num">Each</th><th class="num">Total</th></tr></thead><tbody>' +
+    const mats = '<div class="mini-well"><table class="mini"><thead><tr><th>Material</th><th class="num">Qty</th><th>Source</th><th class="num">Each</th><th class="num">Total</th><th class="c">Gather</th></tr></thead><tbody>' +
       treeRows(E, base.mats, rc, 0, rc.consume * tries, new Set([base.id])) + '</tbody></table></div>' +
       '<dl class="kv tot"><dt>Materials and fees, ' + qfmt(tries) + ' crafts</dt><dd>' + k(rc.attemptCost * tries) + '</dd>' +
       '<dt>Normal items sold</dt><dd>' + (ch.credit ? '−' + k(ch.credit * tries) : '0') + '</dd>' +
@@ -832,7 +966,8 @@
       '<div class="dcard"><h4>Odds</h4>' + odds + '</div>' +
       '<div class="dcard"><h4>Cost per Splendent · ' + METRIC[scn].short + '</h4>' + mats + '</div>' +
       '<div class="dcard"><h4>Sell it or keep it</h4>' + use + '</div>' +
-      '</div><div class="dcard dwide"><h4>Plan your crafts</h4>' + comboPlanHTML(C, row) + '</div>' +
+      '</div><div class="dcard dwide"><h4>Risk and reward · one craft of ' + esc(baseName) + '</h4>' + riskHTML(rc) + '</div>' +
+      '<div class="dcard dwide"><h4>Plan your crafts</h4>' + comboPlanHTML(C, row) + '</div>' +
       '<div class="row-gap dfoot">' + (canManage() ? '<button class="btn" data-act="edit" data-id="' + esc(base.id) + '">Edit ' + esc(baseName) + ' recipe</button>' : '') +
       '<button class="btn ghost" data-act="find-price" data-id="' + esc(row.r.output) + '">Price history</button></div>';
   }
@@ -864,10 +999,11 @@
 
     let rowsHTML = treeRows(E, r.mats, rc, 0, 1, new Set([r.id]));
     if (rc.cmats.length) {
-      rowsHTML += '<tr class="part"><td colspan="5">Combo craft materials · used on ' + pct(rc.pS * rc.c, 0) + ' of attempts' + (rc.comboTaken ? '' : ' (skipped)') + '</td></tr>' + treeRows(E, r.comboMats, rc, 0, 1, new Set([r.id]));
+      rowsHTML += '<tr class="part"><td colspan="6">Combo craft materials · used on ' + pct(rc.pS * rc.c, 0) + ' of attempts' + (rc.comboTaken ? '' : ' (skipped)') + '</td></tr>' + treeRows(E, r.comboMats, rc, 0, 1, new Set([r.id]));
     }
-    const mats = '<div class="mini-well"><table class="mini"><thead><tr><th>Material</th><th class="num">Qty</th><th>Source</th><th class="num">Each</th><th class="num">Total</th></tr></thead><tbody>' +
+    const mats = '<div class="mini-well"><table class="mini"><thead><tr><th>Material</th><th class="num">Qty</th><th>Source</th><th class="num">Each</th><th class="num">Total</th><th class="c">Gather</th></tr></thead><tbody>' +
       rowsHTML + '</tbody></table></div>' +
+      (scn === 'buy' ? '<p class="note">This view assumes you buy everything. Your Gather ticks change the With own gathering and Gain vs selling raw columns.</p>' : '') +
       '<dl class="kv tot"><dt>Materials</dt><dd>' + k(rc.matCost) + '</dd>' +
       (rc.consume < 0.9999 ? '<dt>Expected use (' + pct(rc.consume, 0) + ')</dt><dd>' + k(rc.matCost * rc.consume) + '</dd>' : '') +
       (rc.comboCost ? '<dt>Combo materials, expected</dt><dd>' + k(rc.comboCost) + '</dd>' : '') +
@@ -880,7 +1016,8 @@
       '<div class="dcard"><h4>Odds per attempt</h4>' + odds + '</div>' +
       '<div class="dcard"><h4>Materials · ' + METRIC[scn].short + '</h4>' + mats + '</div>' +
       '<div class="dcard"><h4>Plan a batch</h4>' + planHTML(C, row) + '</div>' +
-      '</div><div class="row-gap dfoot">' + (canManage() ? '<button class="btn" data-act="edit" data-id="' + esc(r.id) + '">Edit recipe</button>' : '') +
+      '</div><div class="dcard dwide"><h4>Risk and reward · ' + METRIC[scn].short + '</h4>' + riskHTML(rc) + '</div>' +
+      '<div class="row-gap dfoot">' + (canManage() ? '<button class="btn" data-act="edit" data-id="' + esc(r.id) + '">Edit recipe</button>' : '') +
       '<button class="btn ghost" data-act="find-price" data-id="' + esc(r.output) + '">Price history</button>' + (r.notes ? '<span class="note">' + esc(r.notes) + '</span>' : '') + '</div>';
   }
   function treeRows(E, list, rcParent, depth, mult, path) {
@@ -890,7 +1027,7 @@
     for (const m of priced || []) {
       const q = m.qty * mult;
       h += '<tr class="' + (depth ? 'subrow' : '') + '"><td><span class="indent" style="--d:' + depth + '"></span>' + (depth ? '↳ ' : '') + esc(itemName(m.item)) + '</td>' +
-        '<td class="num">' + qfmt(q) + '</td><td>' + routeTag(m.route) + '</td><td class="num">' + k(m.cost) + '</td><td class="num">' + k(q * m.cost) + '</td></tr>';
+        '<td class="num">' + qfmt(q) + '</td><td>' + routeTag(m.route) + '</td><td class="num">' + k(m.cost) + '</td><td class="num">' + k(q * m.cost) + '</td><td class="c">' + gatherBox(m.item, m.route) + '</td></tr>';
       const sub = m.route === 'craft' || m.route === 'combo' ? getRecipe(m.recipe) : null;
       if (sub && depth < 4 && !path.has(sub.id)) {
         const src = E.recipe(sub);
@@ -939,7 +1076,7 @@
       const kin = pays ? qty * L.unit : 0;
       if (pays) spend += kin;
       if (L.route === 'missing') missing = true;
-      body += '<tr><td>' + esc(itemName(L.item)) + '</td><td class="num">' + NF0.format(qty) + '</td><td>' + routeTag(L.route) + '</td><td class="num">' + (pays ? k(kin) : L.route === 'gather' ? '0' : '—') + '</td></tr>';
+      body += '<tr><td>' + esc(itemName(L.item)) + '</td><td class="num">' + NF0.format(qty) + '</td><td>' + routeTag(L.route) + '</td><td class="num">' + (pays ? k(kin) : L.route === 'gather' ? '0' : '—') + '</td><td class="c">' + gatherBox(L.item, L.route) + '</td></tr>';
     }
     const subs = [...acc.subs.values()];
     let note = '';
@@ -949,7 +1086,7 @@
         (subs.some(s => s.combo) ? ' Those combo crafts also make normal items you can sell, which this total doesn’t count.' : '') + '</p>';
     }
     return {
-      table: '<div class="mini-well"><table class="mini"><thead><tr><th>Get</th><th class="num">Qty</th><th>From</th><th class="num">Kina</th></tr></thead><tbody>' + body + '</tbody></table></div>',
+      table: '<div class="mini-well"><table class="mini"><thead><tr><th>Get</th><th class="num">Qty</th><th>From</th><th class="num">Kina</th><th class="c">Gather</th></tr></thead><tbody>' + body + '</tbody></table></div>',
       note: note, spend: spend, missing: missing
     };
   }
@@ -1718,6 +1855,15 @@
     'plan-w': t => { const v = num(t.value); UI.wanted = v > 0 ? String(Math.round(v)) : '1'; saveUI(); later(); },
     'plan-g': t => { UI.planGather = t.checked; saveUI(); later(); },
     'rk-craft': t => { UI.canCraft = t.checked; UI.rankShow = PAGE; saveUI(); later(); },
+    'rk-afford': t => { UI.affordOnly = t.checked; UI.rankShow = PAGE; saveUI(); later(); },
+    budget: t => {
+      const raw = t.value.trim(), v = num(raw);
+      if (raw && !(v > 0)) toast('Enter a budget like 10m, 500k or 10,000,000.');
+      UI.budget = raw && v > 0 ? raw : '';
+      if (!UI.budget && UI.per === 'budget') UI.per = 'kina';
+      saveUI(); later();
+    },
+    'gather-toggle': t => { setGather([t.dataset.id], t.checked); later(); },
     'rk-all': t => { UI.rankAll = t.checked; UI.rankShow = PAGE; saveUI(); later(); },
     'set-pending': t => { if (!canManage()) return; Store.putSettings(Object.assign({}, S.settings, { levels: Object.assign({}, S.settings.levels), showPending: t.checked })); recipesVer++; later(); },
     set: t => {
