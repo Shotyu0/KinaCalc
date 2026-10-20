@@ -992,8 +992,10 @@
     odds += '<dt>Failed attempt</dt><dd>' + pct(1 - rc.pS) + '</dd><dd class="why">Loses ' + pct(rc.loss, 0) + ' of the materials.</dd>';
     odds += '<dt>Made per attempt</dt><dd>' + qfmt(rc.units) + ' × ' + esc(outName) + '</dd>';
     if (rc.c > 0 && !rc.sameCombo && rc.pCombo > 0) odds += '<dt>Combo items per attempt</dt><dd>' + qfmt(rc.pCombo * rc.comboQty) + ' × ' + esc(comboName) + '</dd>';
-    odds += '</dl><dl class="kv tot"><dt>Cost per item made</dt><dd>' + k(rc.unitCost) + '</dd>' +
-      '<dt>Break-even list price</dt><dd>' + k(rc.breakEven) + '</dd>' +
+    const covered = rc.unitCost < 0; // the combo items alone earn more than every craft costs
+    odds += '</dl><dl class="kv tot"><dt>Cost per item made</dt><dd>' + (covered ? '0' : k(rc.unitCost)) + '</dd>' +
+      '<dt>Break-even list price</dt><dd>' + (covered ? 'Any price' : k(rc.breakEven)) + '</dd>' +
+      (covered ? '<dd class="why">The ' + esc(comboName) + ' procs alone earn more than the materials cost, so the normal items are pure profit at any price.</dd>' : '') +
       '<dt>Current list price</dt><dd>' + (out && num(out.price) > 0 ? k(out.price) : '—') + '</dd>' +
       (out && histOf(out).length > 1 ? '<dd class="why" style="text-align:right">' + sparkHTML(out) + '</dd>' : '') + '</dl>';
 
@@ -1026,7 +1028,9 @@
     let h = '';
     for (const m of priced || []) {
       const q = m.qty * mult;
-      h += '<tr class="' + (depth ? 'subrow' : '') + '"><td><span class="indent" style="--d:' + depth + '"></span>' + (depth ? '↳ ' : '') + esc(itemName(m.item)) + '</td>' +
+      const batch = m.route === 'craft' && getRecipe(m.recipe) && getRecipe(m.recipe).outQty > 1 ? getRecipe(m.recipe).outQty : 0;
+      h += '<tr class="' + (depth ? 'subrow' : '') + '"><td><span class="indent" style="--d:' + depth + '"></span>' + (depth ? '↳ ' : '') + esc(itemName(m.item)) +
+        (batch ? ' <span class="muted">(made ' + batch + ' per craft; ↳ rows are this craft’s share)</span>' : '') + '</td>' +
         '<td class="num">' + qfmt(q) + '</td><td>' + routeTag(m.route) + '</td><td class="num">' + k(m.cost) + '</td><td class="num">' + k(q * m.cost) + '</td><td class="c">' + gatherBox(m.item, m.route) + '</td></tr>';
       const sub = m.route === 'craft' || m.route === 'combo' ? getRecipe(m.recipe) : null;
       if (sub && depth < 4 && !path.has(sub.id)) {
@@ -1049,10 +1053,11 @@
         if (sub && depth < 6 && !path.has(sub.id)) {
           const src = E.recipe(sub);
           const per = m.route === 'combo' ? src.pCombo * src.comboQty : src.units;
-          const subAttempts = per > 0 ? need / per : 0;
+          // Crafts happen whole: one Magic Crystal craft uses all 20 Spiritstone and makes 10, even if you need 3.
+          const subAttempts = per > 0 ? Math.ceil(need / per - 1e-9) : 0;
           const key = sub.id + ':' + m.route;
-          const s = acc.subs.get(key) || { r: sub, attempts: 0, units: 0, item: m.item, combo: m.route === 'combo' };
-          s.attempts += subAttempts; s.units += need; acc.subs.set(key, s);
+          const s = acc.subs.get(key) || { r: sub, attempts: 0, units: 0, made: 0, item: m.item, combo: m.route === 'combo' };
+          s.attempts += subAttempts; s.units += need; s.made += subAttempts * per; acc.subs.set(key, s);
           const p2 = new Set(path); p2.add(sub.id);
           walk(E, sub, subAttempts, acc, depth + 1, p2);
         } else {
@@ -1081,8 +1086,10 @@
     const subs = [...acc.subs.values()];
     let note = '';
     if (subs.length) {
-      note = '<p class="note">Craft first: ' + subs.map(s => 'about ' + NF0.format(Math.ceil(s.attempts - 1e-6)) + ' crafts of ' + esc(itemName(s.r.output)) +
-        (s.combo ? ' to proc ' + NF0.format(Math.ceil(s.units - 1e-6)) + ' × ' + esc(itemName(s.item)) : ' to get ' + NF0.format(Math.ceil(s.units - 1e-6)))).join('; ') + '.' +
+      note = '<p class="note">Craft first: ' + subs.map(s => plural(s.attempts, 'craft') + ' of ' + esc(itemName(s.r.output)) +
+        (s.combo ? ', expected to proc ' + NF0.format(Math.ceil(s.units - 1e-6)) + ' × ' + esc(itemName(s.item))
+          : ', which makes ' + qfmt(s.r.outQty || 1) + ' per success when you need ' + NF0.format(Math.ceil(s.units - 1e-6)) +
+            (s.made - s.units >= 1 ? '. Keep the spares for later crafts' : ''))).join('; ') + '.' +
         (subs.some(s => s.combo) ? ' Those combo crafts also make normal items you can sell, which this total doesn’t count.' : '') + '</p>';
     }
     return {
