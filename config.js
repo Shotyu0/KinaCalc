@@ -1,12 +1,11 @@
-// Connects the page to your Firebase project. While `firebase` is null, everyone's prices are kept in
-// their own browser only. These values only identify the project, so they're safe to publish:
-// who can read and write is enforced by firestore.rules. See README.md for setup.
+// Connects the page to the Firebase project that holds the shared price book. These values only
+// identify the project, so they're safe to publish: who can read and write is enforced by
+// firestore.rules. Set `firebase` to null to keep everyone's prices in their own browser instead.
 window.KINA_CONFIG = {
-  firebase: null
-  // firebase: {
-  //   apiKey: 'paste from Firebase console',
-  //   authDomain: 'your-project-id.firebaseapp.com',
-  //   projectId: 'your-project-id',
-  //   appId: 'paste from Firebase console'
-  // }
+  firebase: {
+    apiKey: 'AIzaSyBNOibB0dfrNlv71ft4vqfUhtqBVDDijIY',
+    authDomain: 'kina-ledger.firebaseapp.com',
+    projectId: 'kina-ledger',
+    appId: '1:244922754780:web:eecddfd05c5accfc767619'
+  }
 };
