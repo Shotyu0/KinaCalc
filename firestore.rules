@@ -20,8 +20,13 @@ service cloud.firestore {
     function isOwner() {
       return isMember() && get(memberPath()).data.role == 'owner';
     }
+    // Prices: zero up to a trillion Kina.
     function optNumber(d, key) {
       return !(key in d) || d[key] == null || (d[key] is number && d[key] >= 0 && d[key] < 1000000000000);
+    }
+    // Times are milliseconds since 1970, about 1.8 trillion today.
+    function optTime(d, key) {
+      return !(key in d) || d[key] == null || (d[key] is number && d[key] >= 0 && d[key] < 100000000000000);
     }
     function optBool(d, key) {
       return !(key in d) || d[key] is bool;
@@ -30,7 +35,7 @@ service cloud.firestore {
     function validItem(d) {
       return d.keys().hasOnly(['name', 'price', 'vendor', 'gather', 'bound', 'unavailable', 'updatedAt', 'hist', 'example'])
         && d.name is string && d.name.size() > 0 && d.name.size() <= 120
-        && optNumber(d, 'price') && optNumber(d, 'vendor') && optNumber(d, 'updatedAt')
+        && optNumber(d, 'price') && optNumber(d, 'vendor') && optTime(d, 'updatedAt')
         && optBool(d, 'gather') && optBool(d, 'bound') && optBool(d, 'unavailable') && optBool(d, 'example')
         && (!('hist' in d) || (d.hist is list && d.hist.size() <= 200));
     }

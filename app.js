@@ -341,7 +341,7 @@
   }
   function writeFailed(e) {
     const code = e && e.code;
-    if (code === 'permission-denied') toast('That change wasn’t saved: only the owner can make it.');
+    if (code === 'permission-denied') toast(canManage() ? 'The database refused that change. Make sure Firestore is using the latest firestore.rules.' : 'That change wasn’t saved: only the owner can make it.');
     else if (code === 'resource-exhausted') toast('The shared price book hit today’s free usage limit. Try again tomorrow.');
     else toast('A change did not save. Check your connection and try again.');
     scheduleRender();
