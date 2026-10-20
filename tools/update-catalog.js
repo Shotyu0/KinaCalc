@@ -123,7 +123,7 @@ async function main() {
     if (!r.procFrom) continue;
     const self = r.procFrom.base === r.name;
     if (!self) comboNames.add(r.name);
-    for (const base of self ? [r] : byName.get(r.procFrom.base) || []) combos.push({ base: base.id, item: self ? null : r.name, pct: r.procFrom.pct, adds: self });
+    for (const base of self ? [r] : byName.get(r.procFrom.base) || []) combos.push({ base: base.id, item: self ? null : r.name, pct: r.procFrom.pct, adds: self, grade: r.grade });
   }
   // Transfer Crafting: a Splendent item's page that lists its own smaller material set is the guaranteed,
   // character-bound upgrade of an item you already own. Its result can't be sold, so it isn't a recipe here;
@@ -146,7 +146,7 @@ async function main() {
       if (r.level != null) o.lvl = r.level;
       else o.pending = 1; // pages without a mastery level are tiers the Global client doesn't have yet
       if (r.yield > 1) o.qty = r.yield;
-      if (c) { o.combo = c.pct; if (c.item) o.comboItem = c.item; if (c.adds) o.comboAdds = 1; }
+      if (c) { o.combo = c.pct; if (c.item) { o.comboItem = c.item; if (c.grade) o.comboGrade = c.grade; } if (c.adds) o.comboAdds = 1; }
       if (transfers.has(r.id)) o.transfer = transfers.get(r.id);
       return o;
     })

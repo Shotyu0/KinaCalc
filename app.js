@@ -303,6 +303,17 @@
       }
     }
     for (const r of recs) r.blockedBy = blocked.get(r.id) || null;
+    // Item grades, for coloring names the way the game does.
+    const grades = new Map();
+    for (const c of CAT.recipes) {
+      if (c.grade) grades.set(norm(c.out), c.grade);
+      if (c.comboItem && c.comboGrade) grades.set(norm(c.comboItem), c.comboGrade);
+    }
+    for (const r of S.recipes.values()) {
+      const it = r.grade && (S.items.get(r.output) || REG.virt.get(r.output));
+      if (it) grades.set(norm(it.name), r.grade);
+    }
+    REG.grades = grades;
     REG.recipes = m; REG.unavail = unavail; REG.iv = itemsVer; REG.rv = recipesVer;
     return REG;
   }
@@ -317,6 +328,30 @@
   }
   function getRecipe(id) { return reg().recipes.get(id) || null; }
   function itemName(id) { const it = getItem(id); return it ? it.name : '(missing item)'; }
+  const GRADE_CLASS = { Common: 'gr-common', Rare: 'gr-rare', Epic: 'gr-epic', Unique: 'gr-unique' };
+  function itemGrade(id) { const it = getItem(id); return it ? reg().grades.get(norm(it.name)) || '' : ''; }
+  // An item's name, colored by its grade like in the game.
+  function nameHTML(id) { return '<span class="' + (GRADE_CLASS[itemGrade(id)] || 'gr-none') + '">' + esc(itemName(id)) + '</span>'; }
+  // An item's listed price and how long ago it was entered, flagged when it's over a day old.
+  function priceLine(id, prefix) {
+    const it = getItem(id);
+    if (!it || !(num(it.price) > 0)) return '<div class="sub">' + esc(prefix || '') + 'no price</div>';
+    const old = !it.updatedAt || Date.now() - it.updatedAt > DAY;
+    return '<div class="sub' + (old ? ' stale' : '') + '" title="' + esc(it.updatedAt ? 'Updated ' + when(it.updatedAt) : 'No date recorded') + '">' +
+      esc(prefix || '') + k(it.price) + ' · ' + (it.updatedAt ? ago(it.updatedAt) : 'no date') + '</div>';
+  }
+  function priceAge(id) {
+    const it = getItem(id);
+    if (!it || !it.updatedAt) return '';
+    return '<div class="sub' + (Date.now() - it.updatedAt > DAY ? ' stale' : '') + '">' + ago(it.updatedAt) + '</div>';
+  }
+  // How much of a craft's expected sales come from its Splendent proc, and what it would make without it.
+  function comboShare(rc) {
+    if (!rc || rc.kind === 'combo' || rc.sameCombo || !(rc.pCombo > 0) || rc.comboNet == null || !(rc.revenue > 0)) return null;
+    const part = rc.pCombo * rc.comboQty * rc.comboNet;
+    const without = rc.outNet == null ? NaN : rc.pS * rc.outQty * rc.outNet - rc.attemptCost;
+    return { share: part / rc.revenue, without: without, driven: rc.profit > 0 && (part / rc.revenue >= 0.5 || without < 0) };
+  }
   function findItem(name) { return reg().byName.get(norm(name)) || null; }
   function ensureItem(name) {
     const found = findItem(name);
@@ -747,6 +782,8 @@
     if (b.sr.src === 'low') f.push(['loss', 'Needs ' + lvTxt(r.level)]);
     const bd = budgetOf(rcOf(row[UI.metric]), myBudget());
     if (bd && !bd.free && !bd.n) f.push(['loss', 'Over budget']);
+    const cs = comboShare(row[UI.metric]);
+    if (cs && cs.driven) f.push(['ex', 'Splendent-driven']);
     if (out && out.bound) f.push(['', 'Ingredient only']);
     else if (b.outNet == null) f.push(['warn', 'Needs sell price']);
     if (b.comboMissing) f.push(['warn', 'Needs combo item price']);
@@ -813,7 +850,8 @@
       (B ? '<button data-act="per" data-v="budget" aria-pressed="' + (UI.per === 'budget') + '">With my budget</button>' : '') + '</div></div>';
     h += '<p class="help">' + (combo
       ? 'Each row is one Splendent item: what it costs to get by crafting its base item until it procs, after selling the normal items made along the way, and what it sells for after the ' + k(S.settings.tax) + '% fee. Open a row to see what it crafts if you keep it. Recipes that need a Splendent use this cost whenever making one is cheaper than buying it. ' + esc(METRIC[UI.metric].hint)
-      : esc(METRIC[UI.metric].hint) + ' All figures are expected values per craft attempt, after the ' + k(S.settings.tax) + '% market fee. Click a row for the breakdown.') +
+      : esc(METRIC[UI.metric].hint) + ' All figures are expected values per craft attempt, after the ' + k(S.settings.tax) + '% market fee. Click a row for the breakdown. ' +
+        '<strong>Splendent-driven</strong> means most of the profit comes from the occasional Splendent proc, so check that its price is current. Prices over a day old are marked in Sells for.') +
       (UI.per === 'budget' ? ' <strong>With my budget</strong> shows the profit you’d expect from spending your whole budget on that craft, one craft after another without reinvesting, and your chance to finish ahead.' : '') + '</p>';
     h += '<div class="filters"><div class="field"><label for="rq">Find a recipe</label><input id="rq" class="in" type="search" value="' + esc(UI.rankQ) + '" data-inp="rq" placeholder="e.g. Orb, Tea, Longsword" autocomplete="off"></div>' +
       '<div class="field budget"><label for="budget">My budget (Kina)</label><input id="budget" class="in num" inputmode="decimal" value="' + esc(UI.budget) + '" data-chg="budget" placeholder="e.g. 10m" autocomplete="off"></div>' +
@@ -842,11 +880,12 @@
         : b.c > 0 ? 'combo ' + pct(b.c, 0) : (b.sr.src === 'assumed' ? 'assumed' : '&nbsp;');
       h += '<tr class="row' + (open ? ' open' : '') + '" data-act="toggle" data-id="' + esc(r.id) + '">' +
         '<td class="rk">' + (i + 1) + '</td>' +
-        '<td class="c-name"><button class="rname" data-act="toggle" data-id="' + esc(r.id) + '" aria-expanded="' + open + '" aria-controls="d-' + esc(r.id) + '">' + esc(itemName(r.output)) +
+        '<td class="c-name"><button class="rname" data-act="toggle" data-id="' + esc(r.id) + '" aria-expanded="' + open + '" aria-controls="d-' + esc(r.id) + '">' + nameHTML(r.output) +
         (b.outQty > 1 ? ' <span class="x">×' + qfmt(b.outQty) + '</span>' : '') + '</button>' +
         '<div class="rmeta"><span>' + esc(meta) + '</span>' + tagList(rowFlags(row)) + '</div></td>' +
         '<td class="num" data-label="' + (row.kind === 'combo' ? 'Chance per craft' : 'Success') + '"><div class="v">' + pct(b.pS) + '</div><div class="sub">' + odds + '</div></td>' +
-        '<td class="num" data-label="Sells for"><div class="v">' + (out && out.bound ? '—' : k(b.revenue)) + '</div><div class="sub">' + (out && out.bound ? 'not sold' : (out && num(out.price) > 0 ? k(out.price) + ' ea listed' : 'no price')) + '</div></td>' +
+        '<td class="num" data-label="Sells for"><div class="v">' + (out && out.bound ? '—' : k(b.revenue)) + '</div>' + (out && out.bound ? '<div class="sub">not sold</div>' : priceLine(r.output) +
+          (row.kind === 'combo' ? priceLine(b.rc.r.output, 'Base ') : b.c > 0 && !b.sameCombo ? priceLine(b.comboId, 'Splendent ') : '')) + '</td>' +
         moneyCell(row.buy, 'buy', 'Buying all mats') + moneyCell(row.gather, 'gather', 'With own gathering') + moneyCell(row.opp, 'opp', 'Gain vs selling raw') +
         '</tr>';
       if (open) h += '<tr class="detail" id="d-' + esc(r.id) + '"><td colspan="7">' + detailHTML(C, row) + '</td></tr>';
@@ -894,14 +933,14 @@
     const bd = UI.per === 'budget' ? budgetOf(rcOf(rc), myBudget()) : null;
     if (bd && bd.n) {
       return '<section class="lead"><div class="lead-main"><span class="eyebrow">' + (bd.total > 0 ? 'Best use of your ' + compact(myBudget()) + ' budget' : 'Nothing your budget covers turns a profit') + ' · ' + METRIC[UI.metric].short + '</span>' +
-        '<h2 class="lead-name">' + esc(itemName(best.r.output)) + '</h2>' +
+        '<h2 class="lead-name">' + nameHTML(best.r.output) + '</h2>' +
         '<div class="lead-figs"><span class="big ' + tone(bd.total) + '">' + sk(bd.total) + '</span><span>Kina expected from ' + plural(bd.n, 'craft') + '</span><span class="sep">|</span><span>' + pct(bd.ahead) + ' chance to finish ahead</span>' +
         (isFinite(bd.anyCombo) ? '<span class="sep">|</span><span>' + pct(bd.anyCombo) + ' chance of a combo</span>' : '') + '</div>' +
         tagList(rowFlags(best)) + needHTML + '</div>' + stats + '</section>';
     }
     const positive = rc.profit > 0;
     return '<section class="lead"><div class="lead-main"><span class="eyebrow">' + (positive ? 'Most profitable right now' : 'Nothing turns a profit right now') + ' · ' + METRIC[UI.metric].short + '</span>' +
-      '<h2 class="lead-name">' + esc(itemName(best.r.output)) + '</h2>' +
+      '<h2 class="lead-name">' + nameHTML(best.r.output) + '</h2>' +
       '<div class="lead-figs"><span class="big ' + tone(rc.profit) + '">' + sk(rc.profit) + '</span><span>' + (best.kind === 'combo' ? 'Kina per Splendent' : 'Kina per attempt') + '</span><span class="sep">|</span><span>ROI ' + roiTxt(rc.roi) + '</span><span class="sep">|</span><span>' + pct(rc.pS) + (best.kind === 'combo' ? ' chance per craft' : ' success') + '</span></div>' +
       tagList(rowFlags(best)) + needHTML + '</div>' + stats + '</section>';
   }
@@ -985,6 +1024,14 @@
         odds += '<dt>Combo result</dt><dd>' + pct(rc.pCombo) + '</dd><dd class="why">' + pct(rc.c, 0) + ' proc chance on a successful craft, then a second craft at ' + pct(rc.cs) + '. Gives ' + qfmt(rc.comboQty) + ' × ' + esc(comboName) + (r.comboAdds ? ' on top of' : ' instead of') + ' the normal result.</dd>';
       }
     }
+    const cshare = comboShare(rc);
+    if (cshare) {
+      const ci = getItem(rc.comboId), old = ci && (!ci.updatedAt || Date.now() - ci.updatedAt > DAY);
+      odds += '<dt>Sales from the Splendent</dt><dd>' + pct(cshare.share, 0) + '</dd><dd class="why">' +
+        (cshare.driven ? 'Most of this craft’s profit comes from the occasional ' + esc(comboName) + ', so its price matters most. ' : '') +
+        'Without Splendent procs it would make ' + sk(cshare.without) + ' per attempt. The Splendent price, ' + k(ci && ci.price) + ', was entered ' +
+        (ci && ci.updatedAt ? ago(ci.updatedAt) : 'at an unknown time') + (old ? '. Paste a fresh price if it looks off.' : '.') + '</dd>';
+    }
     if (r.transfer && r.transfer.length) {
       odds += '<dt>Transfer Crafting</dt><dd>100%</dd><dd class="why">Turns a ' + esc(outName) + ' you own into ' + (rc.sameCombo ? 'its Splendent version' : esc(comboName)) + ' with ' +
         esc(r.transfer.map(x => x[1] + ' ' + x[0]).join(', ')) + '. The result is bound to your character, so it can’t be sold and isn’t counted here.</dd>';
@@ -1029,9 +1076,9 @@
     for (const m of priced || []) {
       const q = m.qty * mult;
       const batch = m.route === 'craft' && getRecipe(m.recipe) && getRecipe(m.recipe).outQty > 1 ? getRecipe(m.recipe).outQty : 0;
-      h += '<tr class="' + (depth ? 'subrow' : '') + '"><td><span class="indent" style="--d:' + depth + '"></span>' + (depth ? '↳ ' : '') + esc(itemName(m.item)) +
+      h += '<tr class="' + (depth ? 'subrow' : '') + '"><td><span class="indent" style="--d:' + depth + '"></span>' + (depth ? '↳ ' : '') + nameHTML(m.item) +
         (batch ? ' <span class="muted">(made ' + batch + ' per craft; ↳ rows are this craft’s share)</span>' : '') + '</td>' +
-        '<td class="num">' + qfmt(q) + '</td><td>' + routeTag(m.route) + '</td><td class="num">' + k(m.cost) + '</td><td class="num">' + k(q * m.cost) + '</td><td class="c">' + gatherBox(m.item, m.route) + '</td></tr>';
+        '<td class="num">' + qfmt(q) + '</td><td>' + routeTag(m.route) + '</td><td class="num">' + k(m.cost) + (m.route === 'buy' ? priceAge(m.item) : '') + '</td><td class="num">' + k(q * m.cost) + '</td><td class="c">' + gatherBox(m.item, m.route) + '</td></tr>';
       const sub = m.route === 'craft' || m.route === 'combo' ? getRecipe(m.recipe) : null;
       if (sub && depth < 4 && !path.has(sub.id)) {
         const src = E.recipe(sub);
@@ -1081,7 +1128,7 @@
       const kin = pays ? qty * L.unit : 0;
       if (pays) spend += kin;
       if (L.route === 'missing') missing = true;
-      body += '<tr><td>' + esc(itemName(L.item)) + '</td><td class="num">' + NF0.format(qty) + '</td><td>' + routeTag(L.route) + '</td><td class="num">' + (pays ? k(kin) : L.route === 'gather' ? '0' : '—') + '</td><td class="c">' + gatherBox(L.item, L.route) + '</td></tr>';
+      body += '<tr><td>' + nameHTML(L.item) + '</td><td class="num">' + NF0.format(qty) + '</td><td>' + routeTag(L.route) + '</td><td class="num">' + (pays ? k(kin) : L.route === 'gather' ? '0' : '—') + '</td><td class="c">' + gatherBox(L.item, L.route) + '</td></tr>';
     }
     const subs = [...acc.subs.values()];
     let note = '';
@@ -1191,7 +1238,7 @@
       if (r.src === 'mine') tags.push(['', 'Mine']);
       if (notOut(r)) tags.push(['warn', notOutTag(r)]);
       if (r.example) tags.push(['ex', 'Example']);
-      h += '<li><div class="rc-main"><div class="rc-name">' + esc(itemName(r.output)) + (r.outQty > 1 ? ' <span class="muted">×' + qfmt(r.outQty) + '</span>' : '') + tagList(tags) + '</div>' +
+      h += '<li><div class="rc-main"><div class="rc-name">' + nameHTML(r.output) + (r.outQty > 1 ? ' <span class="muted">×' + qfmt(r.outQty) + '</span>' : '') + tagList(tags) + '</div>' +
         '<div class="rc-meta">' + esc([r.profession, r.level != null ? lvTxt(r.level) : null, r.grade].filter(Boolean).join(' · ')) + ' · ' + pct(sr.p) + ' success' +
         (r.combo ? ' · combo ' + qfmt(r.combo) + '%' + (r.comboItem ? ' → ' + esc(itemName(r.comboItem)) : '') : '') + (r.fee ? ' · fee ' + k(r.fee) : '') + '</div>' +
         '<div class="rc-mats">' + r.mats.map(m => qfmt(m.qty) + ' ' + esc(itemName(m.item))).join(' · ') + '</div></div>' +
@@ -1323,7 +1370,7 @@
       else if (needsPrice(it, used, C, outputs)) tags.push(['warn', 'Needs a price']);
       const isStale = num(it.price) > 0 && it.updatedAt && now - it.updatedAt > DAY;
       const deletable = !it.virtual && !u && !reg().catNames.has(norm(it.name));
-      h += '<tr class="' + (open ? 'open' : '') + '"><td class="c-name"><button class="name-btn" data-act="price-open" data-id="' + id + '" aria-expanded="' + open + '">' + esc(it.name) + '</button>' + tagList(tags) + '</td>' +
+      h += '<tr class="' + (open ? 'open' : '') + '"><td class="c-name"><button class="name-btn" data-act="price-open" data-id="' + id + '" aria-expanded="' + open + '">' + nameHTML(it.id) + '</button>' + tagList(tags) + '</td>' +
         '<td class="num"><input id="pi-price-' + id + '" class="cell-in num" inputmode="decimal" value="' + (it.price != null ? NF0.format(it.price) : '') + '" placeholder="—" data-chg="item" data-id="' + id + '" data-f="price" aria-label="Market price of ' + esc(it.name) + '"' + (it.bound ? ' disabled title="Bound items can’t be sold on the market"' : '') + '></td>' +
         '<td>' + sparkHTML(it) + '</td>' +
         '<td class="num"><input id="pi-vendor-' + id + '" class="cell-in num" inputmode="decimal" value="' + (it.vendor != null ? NF0.format(it.vendor) : '') + '" placeholder="—" data-chg="item" data-id="' + id + '" data-f="vendor" aria-label="NPC price of ' + esc(it.name) + '"></td>' +
