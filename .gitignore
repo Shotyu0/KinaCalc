@@ -1,0 +1,11 @@
+# Raw pages cached by tools/update-catalog.js. Only data/catalog.json is published.
+tools/.cache/
+
+# Personal exports and backups of the price book. Keep them out of the public repo.
+private/
+*.export.json
+
+node_modules/
+.DS_Store
+Thumbs.db
+*.log

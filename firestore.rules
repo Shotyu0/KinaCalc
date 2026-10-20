@@ -1,0 +1,75 @@
+rules_version = '2';
+
+// Kina Ledger access rules. Paste these into Firebase console > Firestore Database > Rules.
+//
+// People are added by the owner in the Firebase console: create a document in the `members`
+// collection whose ID is the person's Google email address in lowercase, with a string field
+// `role` set to "owner" (you) or "member" (everyone else). Nobody can add themselves.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+    function memberPath() {
+      return /databases/$(database)/documents/members/$(request.auth.token.email);
+    }
+    function isMember() {
+      return signedIn() && exists(memberPath());
+    }
+    function isOwner() {
+      return isMember() && get(memberPath()).data.role == 'owner';
+    }
+    function optNumber(d, key) {
+      return !(key in d) || d[key] == null || (d[key] is number && d[key] >= 0 && d[key] < 1000000000000);
+    }
+    function optBool(d, key) {
+      return !(key in d) || d[key] is bool;
+    }
+    // A price entry: only the fields the page writes, with sane types and sizes.
+    function validItem(d) {
+      return d.keys().hasOnly(['name', 'price', 'vendor', 'gather', 'bound', 'unavailable', 'updatedAt', 'hist', 'example'])
+        && d.name is string && d.name.size() > 0 && d.name.size() <= 120
+        && optNumber(d, 'price') && optNumber(d, 'vendor') && optNumber(d, 'updatedAt')
+        && optBool(d, 'gather') && optBool(d, 'bound') && optBool(d, 'unavailable') && optBool(d, 'example')
+        && (!('hist' in d) || (d.hist is list && d.hist.size() <= 200));
+    }
+
+    // The member list. Each person may check their own entry; only the console can change it.
+    match /members/{email} {
+      allow read: if signedIn() && request.auth.token.email == email;
+      allow write: if false;
+    }
+
+    // Prices and price history: every member reads and updates them. Only the owner deletes items.
+    match /items/{itemId} {
+      allow read: if isMember();
+      allow create, update: if isMember() && validItem(request.resource.data);
+      allow delete: if isOwner();
+    }
+
+    // Recipe edits and shared settings: members read them, only the owner changes them.
+    match /recipes/{recipeId} {
+      allow read: if isMember();
+      allow write: if isOwner();
+    }
+    match /config/{docId} {
+      allow read: if isMember();
+      allow write: if isOwner();
+    }
+
+    // Each member's own crafting levels, private to them.
+    match /users/{uid} {
+      allow read: if isMember() && request.auth.uid == uid;
+      allow write: if isMember() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['levels'])
+        && request.resource.data.levels is map
+        && request.resource.data.levels.size() <= 20;
+    }
+
+    // Everything else is closed.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

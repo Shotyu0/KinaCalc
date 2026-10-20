@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- Only this site, Google sign-in, Firebase and Google Fonts may load or run anything on this page. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.gstatic.com https://apis.google.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.googleusercontent.com; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com https://*.firebaseapp.com; frame-src https://*.firebaseapp.com https://accounts.google.com; object-src 'none'; base-uri 'self'; form-action 'none'">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<title>Kina Ledger</title>
+<meta name="description" content="Crafting profit calculator for AION 2">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Semi+Condensed:wght@500;600&family=Marcellus&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+  <header class="top">
+    <div class="top-in">
+      <div class="mast">
+        <div class="brand">
+          <span class="coin" aria-hidden="true"></span>
+          <div>
+            <h1>Kina Ledger</h1>
+            <p>Crafting profit calculator for AION 2</p>
+          </div>
+        </div>
+        <div class="acct">
+          <span class="status" id="status"><i></i><span>Connecting…</span></span>
+          <button class="btn small" id="acct-btn" data-act="sign-in" hidden>Sign in</button>
+        </div>
+      </div>
+      <nav class="tabs" id="tabs" role="tablist" aria-label="Sections"></nav>
+    </div>
+  </header>
+  <main class="wrap" id="view" aria-live="polite"></main>
+  <footer class="foot">
+    <div class="foot-in" id="foot">
+      <span>Fan-made calculator. Not affiliated with NCSOFT.</span>
+      <span>Success rates: the Global client's Crafting Chance window.</span>
+    </div>
+  </footer>
+</div>
+<datalist id="dl-items"></datalist>
+<div id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js" integrity="sha384-AQ3POAMqIhwS81FrUH95ekxqBZHeP5tG2JfEL3+7GuTtfRLWnrRh32UxwzM+//A9" crossorigin="anonymous"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js" integrity="sha384-TnlRYaR4JYz/lpaGuaiU61PjNberSA4vjLjtF+oRC/IkohkJqnWxw5EmDSOt1vA1" crossorigin="anonymous"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js" integrity="sha384-qn4Jh88HhJA8dplNQyGjOh9OGI4izVhrfj/qIFgaKcdgOE06pXqIKGlsCILZcLAC" crossorigin="anonymous"></script>
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
