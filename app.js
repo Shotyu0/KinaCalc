@@ -1608,12 +1608,26 @@
     };
     const isItemId = cell => /^\d{9}$/.test(cell);
     const cells = [];
-    for (const line of String(text).split(/\r?\n/)) for (const cell of line.split(/\t|\s{2,}|\|/)) { const v = cell.trim(); if (v) cells.push(v); }
-    const best = new Map();
+    for (const line of String(text).split(/\r?\n/)) {
+      for (const cell of line.split(/\t|\s{2,}|\|/)) {
+        const v = cell.trim();
+        if (!v) continue;
+        // Some browsers copy a name and its 9-digit item ID as one piece: "True Dragon Lord Greaves210230015".
+        const glued = v.match(/^(.*\D)\s*(\d{9})$/);
+        if (glued && /\p{L}/u.test(glued[1])) { cells.push(glued[1].trim()); cells.push(glued[2]); } else cells.push(v);
+      }
+    }
+    const best = new Map(), unknown = [];
+    const headers = /^(item|items|name|cheapest|price|listings?|change|sold|avg|average|vs|qty|quantity)\b/i;
     let found = 0;
     for (let i = 0; i < cells.length; i++) {
       const hit = itemIn(cells[i]);
-      if (!hit) continue;
+      if (!hit) {
+        // Remember a few names that weren't recognized, to explain an import that finds nothing.
+        const c = cells[i];
+        if (unknown.length < 5 && c.length >= 3 && c.length <= 60 && /\p{L}{2}/u.test(c) && !/%/.test(c) && !headers.test(c) && unknown.indexOf(c) < 0) unknown.push(c);
+        continue;
+      }
       found++;
       let price = priceIn(hit.rest);
       for (let j = i + 1; price == null && j < Math.min(cells.length, i + 8); j++) {
@@ -1625,7 +1639,7 @@
       const prev = best.get(hit.it.id);
       if (!prev || price < prev.price) best.set(hit.it.id, { read: cells[i], name: hit.it.name, price: price });
     }
-    return { rows: [...best.values()], found: found };
+    return { rows: [...best.values()], found: found, unknown: unknown, known: known.length };
   }
   function cellNameEnd(cell, name) {
     const i = cell.toLowerCase().indexOf(name.toLowerCase());
@@ -1967,7 +1981,11 @@
       const doubtful = st.market.filter(r => r.doubt).length;
       st.pasteNote = res.rows.length ? 'Found ' + plural(res.rows.length, 'price') + ' for items on your list.' +
         (doubtful ? ' ' + plural(doubtful, 'price') + ' looked wrong and ' + (doubtful === 1 ? 'is' : 'are') + ' unticked.' : '') + ' Check them below, then save.'
-        : res.found ? 'Found item names but no prices next to them. Try copying the price column too.' : 'None of the item names on your list were found in that text.';
+        : res.found ? 'Found item names but no prices next to them. Try copying the price column too.'
+        : !res.known ? 'There’s no item list to match against, because the recipe list didn’t load. Reload the page and try again.'
+        : 'None of the item names on your list were found in that text.' + (res.unknown.length
+          ? ' It has names like ' + res.unknown.map(n => '“' + n + '”').join(', ') + '. If those are in another language, switch aion2.exchange (and any translate extension) to English. If they’re items no recipe uses, like drop-only gear or skins, there’s nothing to update.'
+          : ' Copy the table including the item names, then paste again.');
       render();
     },
     'paste-clear': () => { UI.shots.pasteText = ''; UI.shots.pasteNote = ''; if (UI.shots.source === 'paste') UI.shots.market = null; render(); },
