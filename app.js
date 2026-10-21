@@ -131,10 +131,11 @@
     return total > 50 ? 'Professional Lv ' + (total - 50) : 'Novice Lv ' + total;
   }
   function mergeSettings(d) {
-    const s = { tax: 10, failLoss: 100, levels: {}, showPending: false };
+    const s = { tax: 10, listFee: 2, failLoss: 100, levels: {}, showPending: false };
     if (d && typeof d === 'object') {
       s.showPending = !!d.showPending;
       if (num(d.tax) != null) s.tax = num(d.tax);
+      if (num(d.listFee) != null) s.listFee = num(d.listFee);
       if (num(d.failLoss) != null) s.failLoss = num(d.failLoss);
       s.levels = readLevels(d.levels);
     }
@@ -557,6 +558,15 @@
     }
     return { p: floor.basic / 100, pc: floor.combo / 100, src: 'assumed', grade: grade };
   }
+  // The share of a sale's price lost to fees: the sales fee plus the listing fee, in percent.
+  function saleFees() {
+    const s = S.settings;
+    return (num(s.tax) == null ? 10 : num(s.tax)) + (num(s.listFee) == null ? 2 : num(s.listFee));
+  }
+  function feesTxt() {
+    const s = S.settings;
+    return num(s.listFee) > 0 ? 'the ' + k(s.tax) + '% sales fee and ' + k(s.listFee) + '% listing fee' : 'the ' + k(s.tax) + '% sales fee';
+  }
   function canCraft(r) {
     if (r.level == null) return true;
     const lvl = num(myLevels()[r.profession]);
@@ -565,7 +575,8 @@
 
   // scn: 'buy' = purchase everything, 'gather' = gatherable mats are free, 'opp' = gatherable mats cost their after-fee sell value
   function engine(scn, prod, comboMakers) {
-    const tax = clamp01((num(S.settings.tax) == null ? 10 : num(S.settings.tax)) / 100);
+    // What a sale keeps: every sale pays the sales fee, and listing it paid the listing fee, both as a share of the price.
+    const tax = clamp01(saleFees() / 100);
     const loss = clamp01((num(S.settings.failLoss) == null ? 100 : num(S.settings.failLoss)) / 100);
     const mu = new Map(), mr = new Map(), stack = new Set();
     function netSell(id) {
@@ -922,8 +933,8 @@
       '<button data-act="per" data-v="roi" aria-pressed="' + (UI.per === 'roi') + '">ROI %</button>' +
       (B ? '<button data-act="per" data-v="budget" aria-pressed="' + (UI.per === 'budget') + '">With my budget</button>' : '') + '</div></div>';
     h += '<p class="help">' + (combo
-      ? 'Each row is one Splendent item: what it costs to get by crafting its base item until it procs, after selling the normal items made along the way, and what it sells for after the ' + k(S.settings.tax) + '% fee. Open a row to see what it crafts if you keep it. Recipes that need a Splendent use this cost whenever making one is cheaper than buying it. ' + esc(METRIC[UI.metric].hint)
-      : esc(METRIC[UI.metric].hint) + ' All figures are expected values per craft attempt, after the ' + k(S.settings.tax) + '% market fee. Click a row for the breakdown. ' +
+      ? 'Each row is one Splendent item: what it costs to get by crafting its base item until it procs, after selling the normal items made along the way, and what it sells for after ' + feesTxt() + '. Open a row to see what it crafts if you keep it. Recipes that need a Splendent use this cost whenever making one is cheaper than buying it. ' + esc(METRIC[UI.metric].hint)
+      : esc(METRIC[UI.metric].hint) + ' All figures are expected values per craft attempt, after ' + feesTxt() + '. Click a row for the breakdown. ' +
         '<strong>Splendent-driven</strong> means most of the profit comes from the occasional Splendent proc, so check that its price is current. ' +
         'A price that jumps ' + DOUBT_JUMP + '× away from its usual price is ignored, and a crafted item listed ' + DOUBT_COST + '× above its cost to make is held back as <strong>Check price</strong>. Prices over a day old are marked in Sells for.') +
       (UI.per === 'budget' ? ' <strong>With my budget</strong> shows the profit you’d expect from spending your whole budget on that craft, one craft after another without reinvesting, and your chance to finish ahead.' : '') + '</p>';
@@ -1658,7 +1669,8 @@
   function settingsView() {
     const s = S.settings, lock = canManage() ? '' : ' disabled';
     let h = '<section class="panel"><h2 class="sec-h">Market and recipes</h2><div class="fgrid">' +
-      '<div class="field"><label for="set-tax">Sales fee %</label><input id="set-tax" class="in num" inputmode="decimal" value="' + esc(s.tax) + '" data-chg="set" data-k="tax"' + lock + '><span class="help">Taken from every sale. Guides report 8–10% on your own server. Check the fee on your sale confirmation.</span></div>' +
+      '<div class="field"><label for="set-tax">Sales fee %</label><input id="set-tax" class="in num" inputmode="decimal" value="' + esc(s.tax) + '" data-chg="set" data-k="tax"' + lock + '><span class="help">Taken from the Kina you get when an item sells. Guides report 10%. The Market screen shows the current rate.</span></div>' +
+      '<div class="field"><label for="set-list">Listing fee %</label><input id="set-list" class="in num" inputmode="decimal" value="' + esc(s.listFee) + '" data-chg="set" data-k="listFee"' + lock + '><span class="help">Paid when you list an item, as a share of its price, and not refunded if you cancel or relist. Guides report about 2%, and some say it’s paid in Bound Kina. Set it to 0 if you don’t want to count it.</span></div>' +
       '<div class="field"><label for="set-loss">Materials lost on a failed craft %</label><input id="set-loss" class="in num" inputmode="decimal" value="' + esc(s.failLoss) + '" data-chg="set" data-k="failLoss"' + lock + '><span class="help">Guides say a failed craft uses up the materials. Lower this if your client returns some.</span></div>' +
       '</div>' +
       '<label class="check"><input type="checkbox" id="set-pending" data-chg="set-pending"' + (s.showPending ? ' checked' : '') + lock + '> Include recipes the Global client doesn’t have yet</label>' +
@@ -1700,7 +1712,7 @@
       '<li><strong>Combo:</strong> a successful craft procs the combo at its chance (25% for gear). A proc means crafting again at the COMBO rate from the table, so the Splendent chance per craft is your normal success × 25% × your combo success. For gear it replaces the normal item with the Splendent version, which is the only way to get a Splendent item you can sell. If that second craft fails, you keep the normal item. For food it makes another batch on top.</li>' +
       '<li><strong>Transfer Crafting</strong> is guaranteed but its result is bound to your character, so it’s shown on the recipe for reference and left out of profits.</li>' +
       '<li><strong>Failure</strong> loses the share of materials set above. The crafting fee is paid on every attempt.</li></ul>' +
-      '<h3>Money</h3><ul><li><strong>Sales</strong> = market price × (1 − sales fee) × expected items made.</li>' +
+      '<h3>Money</h3><ul><li><strong>Sales</strong> = market price × (1 − sales fee − listing fee) × expected items made. With the defaults you keep 88% of the listed price.</li>' +
       '<li>Each material uses its cheapest source: market price, NPC price, or the cost of crafting it yourself, worked out the same way and including that craft’s own failures.</li>' +
       '<li>A Splendent material can also come from a combo: craft its base item until it procs, and sell the normal items made along the way. Its cost is the materials for those crafts, minus what the normal items sell for, divided by the Splendent chance per craft. The Splendent view in Rankings lists these costs.</li>' +
       '<li><strong>Buying all mats</strong> ignores gathering. <strong>With own gathering</strong> sets gatherable materials to 0 Kina. <strong>Gain vs selling raw</strong> sets them to what they would sell for after the fee. If it’s above zero, crafting is worth more than selling the materials.</li>' +
