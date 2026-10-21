@@ -68,6 +68,7 @@
   const ID_RE = /^[A-Za-z0-9_\-.~:@+]{1,160}$/;
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
+  const BUILD = '2026-10-21b'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -1586,6 +1587,15 @@
       '<div class="field"><label for="paste-in">Pasted prices</label><textarea id="paste-in" class="in" rows="8" data-inp="paste-text" placeholder="Odyle	1,520&#10;Fine Odyle	4,800&#10;Orichalcum Ore	2.1k">' + esc(st.pasteText || '') + '</textarea></div>' +
       '<div class="row-gap"><button class="btn primary" data-act="paste-read">Read prices</button>' + (st.pasteText ? '<button class="btn ghost" data-act="paste-clear">Clear</button>' : '') + '</div>';
     if (st.pasteNote) h += '<p class="help" role="status">' + esc(st.pasteNote) + '</p>';
+    if (st.lastRead) {
+      // A look inside the last read, for working out why a paste matched nothing.
+      const lr = st.lastRead;
+      h += '<details class="hist"><summary>What the page read</summary><p class="note">Version ' + esc(BUILD) + ' · ' +
+        (lr.mode === 'db' ? 'shared price book' : 'this browser only (' + esc(lr.auth) + ')') + ' · ' + NF0.format(lr.known) + ' item names to match against · ' +
+        NF0.format(lr.cells) + ' pieces of text read.</p><div class="mini-well"><table class="mini"><thead><tr><th>Text</th><th>Matched item</th></tr></thead><tbody>' +
+        lr.seen.map(x => '<tr><td>' + esc(x.text.length > 70 ? x.text.slice(0, 70) + '…' : x.text) + '</td><td>' + (x.match ? esc(x.match) : '<span class="muted">—</span>') + '</td></tr>').join('') +
+        '</tbody></table></div></details>';
+    }
     if (st.market && st.market.length && st.source === 'paste') h += marketReview();
     return h;
   }
@@ -1617,11 +1627,12 @@
         if (glued && /\p{L}/u.test(glued[1])) { cells.push(glued[1].trim()); cells.push(glued[2]); } else cells.push(v);
       }
     }
-    const best = new Map(), unknown = [];
+    const best = new Map(), unknown = [], seen = [];
     const headers = /^(item|items|name|cheapest|price|listings?|change|sold|avg|average|vs|qty|quantity)\b/i;
     let found = 0;
     for (let i = 0; i < cells.length; i++) {
       const hit = itemIn(cells[i]);
+      if (seen.length < 20) seen.push({ text: cells[i], match: hit ? hit.it.name : null });
       if (!hit) {
         // Remember a few names that weren't recognized, to explain an import that finds nothing.
         const c = cells[i];
@@ -1639,7 +1650,7 @@
       const prev = best.get(hit.it.id);
       if (!prev || price < prev.price) best.set(hit.it.id, { read: cells[i], name: hit.it.name, price: price });
     }
-    return { rows: [...best.values()], found: found, unknown: unknown, known: known.length };
+    return { rows: [...best.values()], found: found, unknown: unknown, known: known.length, seen: seen, cells: cells.length };
   }
   function cellNameEnd(cell, name) {
     const i = cell.toLowerCase().indexOf(name.toLowerCase());
@@ -1972,6 +1983,7 @@
       const st = UI.shots, text = st.pasteText || '';
       if (!text.trim()) { st.pasteNote = 'Paste a price list first.'; render(); return; }
       const res = parsePaste(text);
+      st.lastRead = { known: res.known, cells: res.cells, seen: res.seen, mode: S.mode, auth: S.auth };
       st.source = 'paste';
       const C = buildCalc();
       st.market = res.rows.map(r => {
@@ -2130,11 +2142,15 @@
     }
     if (!CAT || !Array.isArray(CAT.recipes)) CAT = { recipes: [] };
     itemsVer++; recipesVer++;
+    const foot = document.getElementById('foot');
     if (CAT.recipes.length) {
       const s = document.createElement('span');
       s.textContent = 'Recipes: AION2 Hub, Global client' + (CAT.built ? ' (read ' + CAT.built + ')' : '') + '.';
-      document.getElementById('foot').appendChild(s);
+      foot.appendChild(s);
     }
+    const v = document.createElement('span');
+    v.textContent = 'Version ' + BUILD + (CAT.recipes.length ? '' : ' · recipe list not loaded');
+    foot.appendChild(v);
   }
   // Prices kept in this browser: used when the page isn't connected to Firebase, or you're not signed in as a member.
   function useLocal() {
