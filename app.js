@@ -336,9 +336,52 @@
   function priceLine(id, prefix) {
     const it = getItem(id);
     if (!it || !(num(it.price) > 0)) return '<div class="sub">' + esc(prefix || '') + 'no price</div>';
+    const pi = priceInfo(it);
+    if (pi.doubtful) {
+      return '<div class="sub stale" title="' + esc(doubtText(pi.latest, pi.usual)) + '">' + esc(prefix || '') + k(pi.latest) + ' looks wrong · using ' + k(pi.usual) + '</div>';
+    }
     const old = !it.updatedAt || Date.now() - it.updatedAt > DAY;
     return '<div class="sub' + (old ? ' stale' : '') + '" title="' + esc(it.updatedAt ? 'Updated ' + when(it.updatedAt) : 'No date recorded') + '">' +
       esc(prefix || '') + k(it.price) + ' · ' + (it.updatedAt ? ago(it.updatedAt) : 'no date') + '</div>';
+  }
+  function doubtText(price, usual) {
+    return price >= usual ? NF0.format(Math.round(price / usual)) + '× its usual ' + k(usual) : 'under a fifth of its usual ' + k(usual);
+  }
+  // Prices on a ranking row that look wrong: ones being ignored because they jumped away from their
+  // usual price, and a crafted item listed far above what it costs to make.
+  function priceDoubts(row) {
+    const rc = rcOf(row.buy);
+    const ids = [rc.r.output];
+    if (rc.comboId !== rc.r.output && rc.pCombo > 0) ids.push(rc.comboId);
+    const ignored = ids.filter(id => { const pi = priceInfo(getItem(id)); return pi && pi.doubtful; });
+    const out = priceInfo(getItem(rc.r.output));
+    const perItem = rc.pS > 0 ? rc.attemptCost / (rc.pS * rc.outQty) : NaN;
+    const overCost = out && out.use > 0 && perItem > 0 && out.use >= DOUBT_COST * perItem ? out.use / perItem : null;
+    return { ignored: ignored, overCost: overCost, perItem: perItem };
+  }
+  // The explanation under "Current list price" when the price looks wrong.
+  function listDoubtHTML(row, out) {
+    const pi = priceInfo(out), pd = priceDoubts(row);
+    let h = '';
+    if (pi && pi.doubtful) {
+      h += '<dd class="why">This price is ' + esc(doubtText(pi.latest, pi.usual)) + ', so the math uses ' + k(pi.usual) + ' instead. If the market really moved, a few more readings at this level make it the new normal. If it was a bad listing, delete that reading on the Prices tab.</dd>';
+    }
+    if (pd.overCost) {
+      h += '<dd class="why loss">This is ' + NF0.format(Math.round(pd.overCost)) + '× what one costs to make (' + k(pd.perItem) + '), which usually means a bad listing. It’s left out of the rankings until the price looks normal again.</dd>';
+    }
+    return h;
+  }
+  // Whether a price about to be saved looks wrong, and why.
+  function newPriceDoubt(it, price, C) {
+    if (!it || !(price > 0)) return null;
+    const recent = histOf(it).slice(-10).map(x => x.p).filter(p => p > 0);
+    if (recent.length && jumped(price, median(recent))) return doubtText(price, median(recent));
+    let cheapest = Infinity;
+    for (const r of (C && C.prod.get(it.id)) || []) {
+      const rc = C.E.buy.recipe(r), per = rc.pS > 0 ? rc.attemptCost / (rc.pS * rc.outQty) : NaN;
+      if (per > 0 && per < cheapest) cheapest = per;
+    }
+    return isFinite(cheapest) && price >= DOUBT_COST * cheapest ? NF0.format(Math.round(price / cheapest)) + '× what it costs to craft (' + k(cheapest) + ')' : null;
   }
   function priceAge(id) {
     const it = getItem(id);
@@ -370,6 +413,33 @@
       for (const id of ids) m.set(id, (m.get(id) || 0) + 1);
     }
     return m;
+  }
+  // Guards against bad listings (troll or RMT prices). A new price this many times above or below the
+  // item's usual price is ignored in favor of the usual one, and a crafted item listed this many times
+  // above its cost to make is flagged.
+  const DOUBT_JUMP = 5;
+  const DOUBT_COST = 20;
+  function median(list) {
+    const s = list.slice().sort((a, b) => a - b), m = s.length >> 1;
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  }
+  // The usual price before the latest reading: the middle of the ten readings before it.
+  function usualBefore(it) {
+    const earlier = histOf(it).slice(0, -1).slice(-10).map(x => x.p).filter(p => p > 0);
+    return earlier.length ? median(earlier) : null;
+  }
+  function jumped(price, usual) { return usual > 0 && price > 0 && (price >= usual * DOUBT_JUMP || price <= usual / DOUBT_JUMP); }
+  // The price the math uses: the latest one, unless it jumped far from the usual price.
+  const priceMemo = { v: -1, map: new Map() };
+  function priceInfo(it) {
+    if (!it) return null;
+    if (priceMemo.v !== itemsVer) { priceMemo.v = itemsVer; priceMemo.map = new Map(); }
+    let info = priceMemo.map.get(it.id);
+    if (info) return info;
+    const p = num(it.price), usual = p > 0 ? usualBefore(it) : null, doubtful = jumped(p, usual);
+    info = { latest: p, usual: usual, doubtful: doubtful, use: doubtful ? usual : p };
+    priceMemo.map.set(it.id, info);
+    return info;
   }
   function histOf(it) {
     const h = it && Array.isArray(it.hist) ? it.hist : [];
@@ -501,7 +571,7 @@
     function netSell(id) {
       const it = getItem(id);
       if (!it || it.bound) return null;
-      const p = num(it.price);
+      const p = priceInfo(it).use;
       return p > 0 ? p * (1 - tax) : null;
     }
     function unit(id) {
@@ -510,7 +580,7 @@
       const opts = [];
       if (it) {
         if (scn !== 'buy' && isGathered(it)) opts.push({ route: 'gather', cost: scn === 'gather' ? 0 : (netSell(id) || 0) });
-        const p = num(it.price); if (p > 0 && !it.bound) opts.push({ route: 'buy', cost: p });
+        const p = priceInfo(it).use; if (p > 0 && !it.bound) opts.push({ route: 'buy', cost: p });
         const v = num(it.vendor); if (v > 0) opts.push({ route: 'vendor', cost: v });
       }
       const inCycle = stack.has(id);
@@ -784,6 +854,9 @@
     if (bd && !bd.free && !bd.n) f.push(['loss', 'Over budget']);
     const cs = comboShare(row[UI.metric]);
     if (cs && cs.driven) f.push(['ex', 'Splendent-driven']);
+    const pd = priceDoubts(row);
+    if (pd.overCost) f.push(['loss', 'Check price']);
+    if (pd.ignored.length) f.push(['warn', 'Ignoring a doubtful price']);
     if (out && out.bound) f.push(['', 'Ingredient only']);
     else if (b.outNet == null) f.push(['warn', 'Needs sell price']);
     if (b.comboMissing) f.push(['warn', 'Needs combo item price']);
@@ -829,7 +902,7 @@
       (!q || loose(itemName(x.r.output)).indexOf(q) >= 0) &&
       (!UI.canCraft || canCraft(x.r)) &&
       (!UI.affordOnly || !B || affordable(x)));
-    const rankable = rows.filter(x => sortKey(x) > -Infinity);
+    const rankable = rows.filter(x => sortKey(x) > -Infinity && !priceDoubts(x).overCost);
     const hidden = rows.length - rankable.length;
     if (!UI.rankAll) rows = rankable;
     rows = rows.slice().sort((a, b) => (sortKey(b) - sortKey(a)) || itemName(a.r.output).localeCompare(itemName(b.r.output)));
@@ -851,13 +924,14 @@
     h += '<p class="help">' + (combo
       ? 'Each row is one Splendent item: what it costs to get by crafting its base item until it procs, after selling the normal items made along the way, and what it sells for after the ' + k(S.settings.tax) + '% fee. Open a row to see what it crafts if you keep it. Recipes that need a Splendent use this cost whenever making one is cheaper than buying it. ' + esc(METRIC[UI.metric].hint)
       : esc(METRIC[UI.metric].hint) + ' All figures are expected values per craft attempt, after the ' + k(S.settings.tax) + '% market fee. Click a row for the breakdown. ' +
-        '<strong>Splendent-driven</strong> means most of the profit comes from the occasional Splendent proc, so check that its price is current. Prices over a day old are marked in Sells for.') +
+        '<strong>Splendent-driven</strong> means most of the profit comes from the occasional Splendent proc, so check that its price is current. ' +
+        'A price that jumps ' + DOUBT_JUMP + '× away from its usual price is ignored, and a crafted item listed ' + DOUBT_COST + '× above its cost to make is held back as <strong>Check price</strong>. Prices over a day old are marked in Sells for.') +
       (UI.per === 'budget' ? ' <strong>With my budget</strong> shows the profit you’d expect from spending your whole budget on that craft, one craft after another without reinvesting, and your chance to finish ahead.' : '') + '</p>';
     h += '<div class="filters"><div class="field"><label for="rq">Find a recipe</label><input id="rq" class="in" type="search" value="' + esc(UI.rankQ) + '" data-inp="rq" placeholder="e.g. Orb, Tea, Longsword" autocomplete="off"></div>' +
       '<div class="field budget"><label for="budget">My budget (Kina)</label><input id="budget" class="in num" inputmode="decimal" value="' + esc(UI.budget) + '" data-chg="budget" placeholder="e.g. 10m" autocomplete="off"></div>' +
       '<label class="check"><input type="checkbox" id="rk-craft" data-chg="rk-craft"' + (UI.canCraft ? ' checked' : '') + '> Only what my levels can craft</label>' +
       '<label class="check"><input type="checkbox" id="rk-afford" data-chg="rk-afford"' + (UI.affordOnly ? ' checked' : '') + (B ? '' : ' disabled') + '> Only what my budget covers</label>' +
-      '<label class="check"><input type="checkbox" id="rk-all" data-chg="rk-all"' + (UI.rankAll ? ' checked' : '') + '> Include recipes still missing prices' + (hidden ? ' <span class="muted">(' + NF0.format(hidden) + ')</span>' : '') + '</label></div>';
+      '<label class="check"><input type="checkbox" id="rk-all" data-chg="rk-all"' + (UI.rankAll ? ' checked' : '') + '> Include recipes with missing or doubtful prices' + (hidden ? ' <span class="muted">(' + NF0.format(hidden) + ')</span>' : '') + '</label></div>';
     if (profs.length > 1) {
       h += '<div class="chips" role="group" aria-label="Profession">' +
         ['all'].concat(profs).map(p => '<button class="chip" data-act="prof" data-p="' + esc(p) + '" aria-pressed="' + (UI.prof === p) + '">' + (p === 'all' ? 'All professions' : esc(p)) + '</button>').join('') + '</div>';
@@ -1043,7 +1117,7 @@
     odds += '</dl><dl class="kv tot"><dt>Cost per item made</dt><dd>' + (covered ? '0' : k(rc.unitCost)) + '</dd>' +
       '<dt>Break-even list price</dt><dd>' + (covered ? 'Any price' : k(rc.breakEven)) + '</dd>' +
       (covered ? '<dd class="why">The ' + esc(comboName) + ' procs alone earn more than the materials cost, so the normal items are pure profit at any price.</dd>' : '') +
-      '<dt>Current list price</dt><dd>' + (out && num(out.price) > 0 ? k(out.price) : '—') + '</dd>' +
+      '<dt>Current list price</dt><dd>' + (out && num(out.price) > 0 ? k(out.price) : '—') + '</dd>' + listDoubtHTML(row, out) +
       (out && histOf(out).length > 1 ? '<dd class="why" style="text-align:right">' + sparkHTML(out) + '</dd>' : '') + '</dl>';
 
     let rowsHTML = treeRows(E, r.mats, rc, 0, 1, new Set([r.id]));
@@ -1367,6 +1441,7 @@
       const tags = [];
       if (it.example) tags.push(['ex', 'Example']);
       if (reg().unavail.has(it.id)) tags.push(['warn', 'Not in game']);
+      if (priceInfo(it).doubtful) tags.push(['loss', 'Doubtful price']);
       else if (needsPrice(it, used, C, outputs)) tags.push(['warn', 'Needs a price']);
       const isStale = num(it.price) > 0 && it.updatedAt && now - it.updatedAt > DAY;
       const deletable = !it.virtual && !u && !reg().catNames.has(norm(it.name));
@@ -1570,6 +1645,7 @@
         const d = old > 0 && p > 0 ? (p - old) / old : null;
         change = old > 0 ? '<span class="muted">' + k(old) + ' → ' + k(p) + '</span>' + (d != null ? ' <span>' + (d >= 0 ? '▲ ' : '▼ ') + Math.abs(Math.round(d * 100)) + '%</span>' : '') : '<span class="tag">First price</span>';
       }
+      if (r.doubt) change += '<div><span class="tag loss">Looks wrong</span> <span class="sub">' + esc(r.doubt) + '. Tick it only if the price is real.</span></div>';
       const readAs = r.read && norm(r.read) !== norm(r.name) ? '<div class="sub" style="padding:0 8px">Read as “' + esc(r.read) + '”</div>' : '';
       h += '<tr><td class="c"><input type="checkbox" class="check" id="sm-inc-' + i + '" data-chg="sm-inc" data-i="' + i + '"' + (r.include ? ' checked' : '') + ' aria-label="Save this row"></td>' +
         '<td><input id="sm-name-' + i + '" class="cell-in" list="dl-items" value="' + esc(r.name) + '" data-chg="sm-name" data-i="' + i + '" aria-label="Item name" autocomplete="off">' + readAs + '</td>' +
@@ -1871,8 +1947,14 @@
       if (!text.trim()) { st.pasteNote = 'Paste a price list first.'; render(); return; }
       const res = parsePaste(text);
       st.source = 'paste';
-      st.market = res.rows.map(r => ({ read: null, name: r.name, include: true, priceText: NF0.format(r.price) }));
-      st.pasteNote = res.rows.length ? 'Found ' + plural(res.rows.length, 'price') + ' for items on your list. Check them below, then save.'
+      const C = buildCalc();
+      st.market = res.rows.map(r => {
+        const doubt = newPriceDoubt(findItem(r.name), r.price, C);
+        return { read: null, name: r.name, include: !doubt, priceText: NF0.format(r.price), doubt: doubt };
+      });
+      const doubtful = st.market.filter(r => r.doubt).length;
+      st.pasteNote = res.rows.length ? 'Found ' + plural(res.rows.length, 'price') + ' for items on your list.' +
+        (doubtful ? ' ' + plural(doubtful, 'price') + ' looked wrong and ' + (doubtful === 1 ? 'is' : 'are') + ' unticked.' : '') + ' Check them below, then save.'
         : res.found ? 'Found item names but no prices next to them. Try copying the price column too.' : 'None of the item names on your list were found in that text.';
       render();
     },
@@ -1898,6 +1980,8 @@
         const raw = t.value.trim(), v = raw === '' ? null : num(raw);
         if (raw !== '' && (v == null || v < 0)) { toast('Enter a price like 1520, 1,520 or 1.5k.'); t.value = it[f] != null ? NF0.format(it[f]) : ''; return; }
         if (v === it[f]) { t.value = v != null ? NF0.format(v) : ''; return; }
+        const doubt = f === 'price' ? newPriceDoubt(it, v, buildCalc()) : null;
+        if (doubt) toast('Saved, but it’s ' + doubt + '. The rankings keep using the usual price until more readings agree.');
         next = f === 'price' ? withPrice(it, v) : Object.assign({}, it, { vendor: v, example: false });
       } else if (f === 'gather') { setGather([it.id], t.checked); later(); return; }
       else if (f === 'bound' || f === 'unavailable') next = Object.assign({}, it, { [f]: t.checked, example: false });
@@ -1937,8 +2021,14 @@
     'ed-check': t => { UI.editor[t.dataset.k] = t.checked; },
     'ni-gather': t => { UI.newItem.gather = t.checked; },
     'sm-inc': t => { UI.shots.market[+t.dataset.i].include = t.checked; later(); },
-    'sm-name': t => { UI.shots.market[+t.dataset.i].name = t.value.trim(); later(); },
-    'sm-price': t => { const r = UI.shots.market[+t.dataset.i]; const v = num(t.value); r.priceText = v != null ? NF0.format(v) : t.value.trim(); if (!(v > 0)) r.include = false; later(); }
+    'sm-name': t => { const r = UI.shots.market[+t.dataset.i]; r.name = t.value.trim(); r.doubt = newPriceDoubt(findItem(r.name), num(r.priceText), buildCalc()); later(); },
+    'sm-price': t => {
+      const r = UI.shots.market[+t.dataset.i], v = num(t.value);
+      r.priceText = v != null ? NF0.format(v) : t.value.trim();
+      if (!(v > 0)) r.include = false;
+      r.doubt = newPriceDoubt(findItem(r.name), v, buildCalc());
+      later();
+    }
   };
 
   const INPUTS = {
