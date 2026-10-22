@@ -229,12 +229,16 @@ tr.detail > td { background: var(--sunk); padding: 16px; border-top: 0; }
 .grid.gath td { vertical-align: middle; }
 .grid.gath .cell-in { border-color: var(--line); background: var(--surface); }
 .gname { display: flex; align-items: center; gap: 8px; }
+.runform { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; }
+.mini.wide { min-width: 640px; }
+.ngrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; margin-top: 14px; }
+@media (max-width: 760px) { .ngrid { grid-template-columns: 1fr; } }
 .lead-stats dd.sub { font: 400 12px/1.3 var(--f-ui); color: var(--ink-3); }
 
 @media (max-width: 760px) {
   .grid.rank, .grid.gath { min-width: 0; }
-  .grid.rank thead, .grid.gath thead { display: none; }
-  .grid.rank, .grid.rank tbody, .grid.gath, .grid.gath tbody { display: block; }
+  .grid.rank > thead, .grid.gath > thead { display: none; }
+  .grid.rank, .grid.rank > tbody, .grid.gath, .grid.gath > tbody { display: block; }
   .grid.rank tr.row, .grid.gath tr.row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; padding: 14px; border-top: 1px solid var(--line); }
   .grid.rank tbody tr.row:first-child, .grid.gath tbody tr.row:first-child { border-top: 0; }
   .grid.rank tr.row td, .grid.gath tr.row td { display: block; padding: 0; border: 0; background: none; }
@@ -242,7 +246,7 @@ tr.detail > td { background: var(--sunk); padding: 16px; border-top: 0; }
   .grid.rank tr.row td.is-sort, .grid.rank tr.row:hover td.is-sort { background: var(--gold-soft); border-radius: 8px; padding: 6px 8px; margin: -6px -8px; }
   .grid.rank td.c-name, .grid.gath td.c-name { grid-column: 1 / -1; }
   .grid.rank td.rk { display: none; }
-  .grid.rank td.num, .grid.gath td.num { text-align: left; }
+  .grid.rank tr.row > td.num, .grid.gath tr.row > td.num { text-align: left; }
   .grid.gath .cell-in.num { text-align: left; }
   .grid.rank td[data-label]::before, .grid.gath td[data-label]::before { content: attr(data-label); display: block; font: 600 11px/1.3 var(--f-label); letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); margin-bottom: 2px; }
   .grid.rank tr.detail, .grid.gath tr.detail { display: block; }

@@ -68,7 +68,7 @@
   const ID_RE = /^[A-Za-z0-9_\-.~:@+]{1,160}$/;
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
-  const BUILD = '2026-10-22a'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-10-22b'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -132,14 +132,14 @@
     return total > 50 ? 'Professional Lv ' + (total - 50) : 'Novice Lv ' + total;
   }
   function mergeSettings(d) {
-    const s = { tax: 10, listFee: 2, failLoss: 100, levels: {}, showPending: false, rates: {}, craftMin: null };
+    const s = { tax: 10, listFee: 2, failLoss: 100, levels: {}, showPending: false, runs: [], craftMin: null };
     if (d && typeof d === 'object') {
       s.showPending = !!d.showPending;
       if (num(d.tax) != null) s.tax = num(d.tax);
       if (num(d.listFee) != null) s.listFee = num(d.listFee);
       if (num(d.failLoss) != null) s.failLoss = num(d.failLoss);
       s.levels = readLevels(d.levels);
-      s.rates = readRates(d.rates);
+      s.runs = readRuns(d.runs);
       if (num(d.craftMin) > 0) s.craftMin = num(d.craftMin);
     }
     return s;
@@ -162,7 +162,7 @@
   }
 
   // auth: 'off' (no Firebase config) | 'pending' | 'out' | 'notmember' | 'member'. role: what this person may change.
-  const S = { items: new Map(), recipes: new Map(), settings: mergeSettings(null), ready: false, mode: 'pending', auth: 'pending', role: 'owner', email: null, uid: null, mine: null, myGather: null, myRates: null, myCraftMin: null };
+  const S = { items: new Map(), recipes: new Map(), settings: mergeSettings(null), ready: false, mode: 'pending', auth: 'pending', role: 'owner', email: null, uid: null, mine: null, myGather: null, myRuns: null, myCraftMin: null };
   // The owner manages recipes, settings and deleting items; members update prices and their own levels.
   function canManage() { return S.mode !== 'db' || S.role === 'owner'; }
   // Your crafting levels: your own copy when the page knows who you are, otherwise the shared settings.
@@ -210,20 +210,29 @@
       Store.putItem(next);
     }
   }
-  // How many of each material you gather in an hour, and the minutes one craft takes you. Like levels,
-  // they're yours alone in the shared price book and kept with the settings in this browser alone.
-  function readRates(obj) {
-    const out = {};
-    if (obj && typeof obj === 'object') for (const id of Object.keys(obj)) { const v = num(obj[id]); if (ID_RE.test(id) && v > 0 && v < 1e7) out[id] = v; }
-    return out;
+  // Your gathering sessions (how long you worked one kind of node and how many of each grade you got)
+  // and the minutes one craft takes you. Like levels, they're yours alone in the shared price book and
+  // kept with the settings in this browser alone. A session is { f: node's base item, m: minutes,
+  // n: { item: count }, t: when }.
+  const RUNS_MAX = 300;
+  function readRuns(list) {
+    const out = [];
+    if (!Array.isArray(list)) return out;
+    for (const x of list) {
+      if (!x || typeof x !== 'object' || typeof x.f !== 'string' || !ID_RE.test(x.f)) continue;
+      const m = num(x.m), n = {};
+      if (!(m > 0 && m <= 1440)) continue;
+      if (x.n && typeof x.n === 'object') for (const id of Object.keys(x.n)) { const c = num(x.n[id]); if (ID_RE.test(id) && c >= 0 && c < 1e6) n[id] = c; }
+      out.push({ f: x.f, m: m, n: n, t: num(x.t) > 0 ? num(x.t) : 0 });
+    }
+    return out.slice(-RUNS_MAX);
   }
-  function myRates() { return S.uid ? (S.myRates || {}) : (S.settings.rates || {}); }
+  function myRuns() { return S.uid ? (S.myRuns || []) : (S.settings.runs || []); }
   function myCraftMin() { const v = S.uid ? S.myCraftMin : S.settings.craftMin; return v > 0 ? v : null; }
-  function setRates(changes) {
-    const r = Object.assign({}, myRates());
-    for (const id of Object.keys(changes)) { if (changes[id] == null) delete r[id]; else r[id] = changes[id]; }
-    if (S.uid && DB) { S.myRates = r; writePrefs(); }
-    else Store.putSettings(Object.assign({}, S.settings, { rates: r }));
+  function setRuns(list) {
+    list = list.slice(-RUNS_MAX);
+    if (S.uid && DB) { S.myRuns = list; writePrefs(); }
+    else Store.putSettings(Object.assign({}, S.settings, { runs: list }));
   }
   function setCraftMin(v) {
     if (S.uid && DB) { S.myCraftMin = v; writePrefs(); }
@@ -233,7 +242,7 @@
     if (!S.uid || !DB) return;
     const body = { levels: myLevels(), gather: [...myGather()] };
     // Left out until used, so saving levels still works under rules from before the Gathering tab.
-    if (Object.keys(myRates()).length) body.rates = myRates();
+    if (myRuns().length) body.runs = myRuns();
     if (myCraftMin() != null) body.craftMin = myCraftMin();
     dbWrite('users/' + S.uid, body);
   }
@@ -242,7 +251,7 @@
     priceQuery: '', priceSort: 'name', priceFilter: 'all', priceShow: 100, priceOpen: null,
     rankQ: '', rankAll: false, canCraft: false, rankShow: PAGE,
     recQ: '', recProf: 'all', recSrc: 'all', recShow: PAGE, budget: '', affordOnly: false,
-    gatherShow: '', gatherQ: '', gOpen: null
+    gatherShow: '', gatherQ: '', gOpen: null, runDraft: null
   }, readUI());
   UI.editor = null; UI.editorErr = []; UI.editorFrom = 'recipes';
   UI.shots = { status: 'idle', market: null, source: null, pasteText: '', pasteNote: '' };
@@ -537,7 +546,7 @@
     putSettings(s) {
       S.settings = s;
       if (!DB) { saveLocal(); return; }
-      const shared = clean(s); delete shared.rates; delete shared.craftMin; // personal, kept in users/{uid}
+      const shared = clean(s); delete shared.runs; delete shared.craftMin; // personal, kept in users/{uid}
       dbWrite('config/settings', shared);
     }
   };
@@ -1727,11 +1736,33 @@
     return h + '</tbody></table></div></section>';
   }
 
-  // Raw materials (used by a recipe, made by none) and what an hour spent gathering each is worth: sold
-  // as is, or crafted into each recipe that uses it. Crafts value their other materials as in "Gain vs
-  // selling raw": bought, or gathered and counted at what they'd sell for.
+  // Minutes from "45", "45m", "1h", "1h 20m" or "1:20".
+  function minutesIn(s) {
+    s = String(s || '').trim().toLowerCase();
+    let m = s.match(/^(\d+):([0-5]?\d)$/);
+    if (m) return +m[1] * 60 + +m[2];
+    m = s.match(/^(?:(\d*\.?\d+)\s*h(?:ours?|rs?)?)?\s*(?:(\d*\.?\d+)\s*(?:m(?:ins?|inutes?)?)?)?$/);
+    return m && (m[1] || m[2]) ? +(m[1] || 0) * 60 + +(m[2] || 0) : null;
+  }
+  function durTxt(min) {
+    const t = Math.round(min || 0);
+    if (t < 60) return NF1.format(min || 0) + ' min';
+    return Math.floor(t / 60) + ' h' + (t % 60 ? ' ' + (t % 60) + ' min' : '');
+  }
+  function runDraft(f) {
+    if (!UI.runDraft || UI.runDraft.f !== f) UI.runDraft = { f: f, m: '', n: {} };
+    return UI.runDraft;
+  }
+  // A node always gives the plain (Common) material and can tier up to better grades of it.
+  const GRADE_RE = /^(Fresh|Fine|Pure|Radiant) (.+)$/;
+  const NODE_GRADES = ['Common', 'Fresh', 'Fine', 'Pure', 'Radiant'];
+  function nodeGrade(name) { const m = String(name).match(GRADE_RE); return m ? m[1] : 'Common'; }
+  // Raw materials (used by a recipe, made by none), grouped by the node that gives them: Fine Sapphire
+  // Gemstone comes from the same node as Sapphire Gemstone. A node's hour is valued from your logged
+  // sessions, sold as is or partly crafted. Crafts value their other materials as in "Gain vs selling
+  // raw": bought, or gathered and counted at what they'd sell for.
   function gatherCalc(C) {
-    const tC = myCraftMin(), rates = myRates(), B = myBudget();
+    const tC = myCraftMin(), B = myBudget();
     const levelsSet = Object.keys(myLevels()).length > 0;
     const made = new Set(C.prod.keys());
     for (const r of allRecipes()) if (r.comboItem) made.add(r.comboItem);
@@ -1743,28 +1774,66 @@
         uses.get(m.item).push({ row: row, m: m });
       }
     }
-    const out = [];
+    const mats = new Map();
     for (const [id, list] of uses) {
       const it = getItem(id);
       if (!it || it.bound || reg().unavail.has(id) || (num(it.vendor) > 0 && !isGathered(it))) continue;
-      const net = C.E.opp.netSell(id), R = rates[id] > 0 ? rates[id] : null;
-      const crafts = [];
+      const net = C.E.opp.netSell(id), crafts = [];
       for (const { row, m } of list) {
         const rc = row.opp;
         if (!isFinite(rc.profit) || (levelsSet && !canCraft(row.r)) || priceDoubts(row).overCost) continue;
         if (B && !(outcomesOf(row.gather).stake <= B)) continue;
         const used = m.qty * rc.consume;
-        if (!(used > 0)) continue;
-        // The craft's gain over selling the material it uses, and its profit if that material costs nothing.
-        const gain = rc.profit + used * (m.cost - (net || 0));
-        const free = gain + used * (net || 0);
-        crafts.push({ row: row, qty: m.qty, gain: gain, hour: R && tC ? free / (used / R + tC / 60) : NaN });
+        // The craft's gain over selling the material it uses.
+        if (used > 0) crafts.push({ row: row, qty: m.qty, used: used, gain: rc.profit + used * (m.cost - (net || 0)) });
       }
-      const key = c => isFinite(c.hour) ? c.hour : c.gain;
-      crafts.sort((a, b) => key(b) - key(a));
-      out.push({ id: id, it: it, net: net, R: R, n: list.length, rawHour: R && net != null ? R * net : NaN, crafts: crafts, best: crafts[0] || null });
+      crafts.sort((a, b) => b.gain - a.gain);
+      mats.set(id, { id: id, it: it, net: net, crafts: crafts, best: crafts[0] || null });
+    }
+    const nodes = new Map();
+    for (const g of mats.values()) {
+      const m = g.it.name.match(GRADE_RE), base = m && findItem(m[2]);
+      const key = base && mats.has(base.id) ? base.id : g.id;
+      if (!nodes.has(key)) nodes.set(key, { key: key, name: itemName(key), grades: [] });
+      nodes.get(key).grades.push(g);
+    }
+    const runs = myRuns(), out = [];
+    for (const f of nodes.values()) {
+      f.grades.sort((a, b) => NODE_GRADES.indexOf(nodeGrade(a.it.name)) - NODE_GRADES.indexOf(nodeGrade(b.it.name)));
+      f.ids = f.grades.map(g => g.id);
+      f.runs = runs.filter(r => r.f === f.key).sort((a, b) => b.t - a.t);
+      f.minutes = f.runs.reduce((s, r) => s + r.m, 0);
+      f.got = 0;
+      for (const g of f.grades) {
+        g.got = f.runs.reduce((s, r) => s + (r.n[g.id] || 0), 0);
+        g.perHour = f.minutes ? g.got * 60 / f.minutes : NaN;
+        f.got += g.got;
+      }
+      f.unpriced = f.grades.filter(g => g.got > 0 && g.net == null);
+      f.sellHour = f.minutes ? f.grades.reduce((s, g) => s + (g.net == null ? 0 : g.perHour * g.net), 0) : NaN;
+      f.plan = f.minutes && tC ? craftPlan(f, tC) : null;
+      f.craftHour = f.plan ? f.plan.hour : NaN;
+      out.push(f);
     }
     return out;
+  }
+  // Crafting part of an hour's haul: the crafts that pay most over selling their materials, taken while
+  // each still earns more per hour of crafting than the hour so far. Crafting time is added to the hour.
+  function craftPlan(f, tC) {
+    const h = tC / 60, opts = [], seen = new Set(), steps = [];
+    for (const g of f.grades) for (const c of g.crafts) if (c.gain > 0 && g.perHour > 0) opts.push({ g: g, c: c });
+    opts.sort((a, b) => b.c.gain - a.c.gain);
+    const left = new Map(f.grades.map(g => [g.id, g.perHour]));
+    let kina = f.sellHour, hours = 1;
+    for (const o of opts) {
+      if (o.c.gain / h <= kina / hours) break;
+      if (seen.has(o.c.row.r.id) || !(left.get(o.g.id) > 0)) continue;
+      const n = left.get(o.g.id) / o.c.used;
+      seen.add(o.c.row.r.id); left.set(o.g.id, 0);
+      kina += n * o.c.gain; hours += n * h;
+      steps.push({ g: o.g, c: o.c, n: n });
+    }
+    return { kina: kina, hours: hours, hour: kina / hours, steps: steps };
   }
   // The craft with the best expected profit when every material is bought, within your budget if you set one.
   function bestBuyCraft(C) {
@@ -1777,30 +1846,30 @@
     }
     return best;
   }
-  function gatherLead(C, list, tC) {
-    let raw = null, craft = null, timed = 0;
-    for (const g of list) {
-      if (!g.R) continue;
-      timed++;
-      if (isFinite(g.rawHour) && (!raw || g.rawHour > raw.rawHour)) raw = g;
-      if (g.best && isFinite(g.best.hour) && (!craft || g.best.hour > craft.best.hour)) craft = g;
+  function gatherLead(C, nodes, tC) {
+    let sell = null, craft = null, minutes = 0;
+    for (const f of nodes) {
+      minutes += f.minutes;
+      if (isFinite(f.sellHour) && (!sell || f.sellHour > sell.sellHour)) sell = f;
+      if (isFinite(f.craftHour) && (!craft || f.craftHour > craft.craftHour)) craft = f;
     }
     const buy = bestBuyCraft(C), buyHour = buy && tC ? buy.buy.profit * 60 / tC : NaN;
+    const crafted = craft && craft.plan.steps.length;
     const stat = (label, v, sub) => '<div><dt>' + label + '</dt><dd class="' + tone(v) + '">' + (isFinite(v) ? sk(v) : '—') + '</dd><dd class="sub">' + sub + '</dd></div>';
     const stats = '<dl class="lead-stats">' +
-      stat('Gather and sell', raw ? raw.rawHour : NaN, raw ? nameHTML(raw.id) : 'Enter your haul') +
-      stat('Gather and craft', craft ? craft.best.hour : NaN, craft ? nameHTML(craft.best.row.r.output) : tC ? 'Enter your haul' : 'Enter minutes per craft') +
+      stat('Gather and sell', sell ? sell.sellHour : NaN, sell ? nameHTML(sell.key) : 'Log a session') +
+      stat('Gather and craft', crafted ? craft.craftHour : NaN, crafted ? nameHTML(craft.key) : !tC ? 'Enter minutes per craft' : craft ? 'Selling pays more' : 'Log a session') +
       stat('Buy and craft', buyHour, !buy ? 'No craft has all its prices' : tC ? nameHTML(buy.r.output) : 'Enter minutes per craft') +
-      '<div><dt>Hauls entered</dt><dd>' + NF0.format(timed) + '</dd><dd class="sub">of ' + plural(list.length, 'raw material') + '</dd></div></dl>';
+      '<div><dt>Time logged</dt><dd>' + durTxt(minutes) + '</dd><dd class="sub">' + plural(myRuns().length, 'session') + '</dd></div></dl>';
     const opts = [];
-    if (raw) opts.push({ v: raw.rawHour, route: 'Gather and sell', id: raw.id, how: k(raw.R) + ' an hour at ' + k(raw.net) + ' each after fees' });
-    if (craft) opts.push({ v: craft.best.hour, route: 'Gather and craft', id: craft.best.row.r.output, how: 'from your ' + esc(craft.it.name) });
+    if (sell) opts.push({ v: sell.sellHour, route: 'Gather and sell', id: sell.key, how: 'gather ' + esc(sell.name) + ' and sell everything' });
+    if (crafted) opts.push({ v: craft.craftHour, route: 'Gather and craft', id: craft.key, how: 'gather ' + esc(craft.name) + ' and craft ' + esc(itemName(craft.plan.steps[0].c.row.r.output)) + (craft.plan.steps.length > 1 ? ' and more' : '') });
     if (isFinite(buyHour)) opts.push({ v: buyHour, route: 'Buy and craft', id: buy.r.output, how: sk(buy.buy.profit) + ' a craft at ' + qfmt(tC) + ' min each, with ' + compact(outcomesOf(buy.buy).stake) + ' Kina of materials on the line' });
     opts.sort((a, b) => b.v - a.v);
     const w = opts[0];
-    if (!w) {
+    if (!w || (!sell && !crafted)) {
       return '<section class="lead"><div class="lead-main"><span class="eyebrow">Gathering</span><h2 class="lead-name">What’s an hour of gathering worth?</h2>' +
-        '<p class="help">Enter how many of a material you gather in an hour, and how many minutes one craft takes you. This tab then compares gathering and selling, gathering and crafting, and buying the materials to craft.</p></div>' + stats + '</section>';
+        '<p class="help">Open a node below, gather it for a while, and log how long it took and how many of each grade you got. This tab then compares gathering and selling, gathering and crafting, and buying the materials to craft.</p></div>' + stats + '</section>';
     }
     const next = opts[1];
     return '<section class="lead"><div class="lead-main"><span class="eyebrow">' + (w.v > 0 ? 'Best use of an hour' : 'Nothing here turns a profit') + ' · ' + w.route + '</span>' +
@@ -1809,65 +1878,81 @@
       (next ? '<p class="help">' + sk(w.v - next.v) + ' an hour more than ' + next.route.toLowerCase() + '.</p>' : '') + '</div>' + stats + '</section>';
   }
   function gatherView() {
-    const C = buildCalc(), all = gatherCalc(C), tC = myCraftMin();
-    const mine = all.filter(g => isGathered(g.it) || g.R);
+    const C = buildCalc(), nodes = gatherCalc(C), tC = myCraftMin();
+    const mine = nodes.filter(f => f.runs.length || f.grades.some(g => isGathered(g.it)));
     const show = UI.gatherShow === 'all' || UI.gatherShow === 'mine' ? UI.gatherShow : mine.length ? 'mine' : 'all';
     const q = loose(UI.gatherQ);
-    const best = g => Math.max(isFinite(g.rawHour) ? g.rawHour : -Infinity, g.best && isFinite(g.best.hour) ? g.best.hour : -Infinity);
-    const rows = (show === 'mine' ? mine : all).filter(g => !q || loose(g.it.name).indexOf(q) >= 0)
-      .sort((a, b) => (best(b) - best(a)) || ((b.net || 0) - (a.net || 0)) || a.it.name.localeCompare(b.it.name));
-    let h = gatherLead(C, all, tC);
-    h += '<p class="help">Enter how many of each material you gather in an hour, counting travel between nodes and double harvests, and the minutes one craft keeps you busy: its timer plus buying and listing. Figures are Kina per hour of your time, after ' + feesTxt() + '. ' +
-      '<strong>Gather and craft</strong> counts the time to gather what a craft uses plus your minutes per craft. The craft’s other materials are bought, or counted at their sell price if you gather them too. Basic gathering costs no energy, but Odyle in the air uses flight time.' +
-      ' It assumes the market buys everything at today’s price.' +
-      (Object.keys(myLevels()).length ? ' Only crafts your levels allow are counted' + (myBudget() ? ', and only ones your ' + compact(myBudget()) + ' budget covers.' : '.') : myBudget() ? ' Only crafts your ' + compact(myBudget()) + ' budget covers are counted.' : ' Set a budget on Rankings to count only crafts you can afford.') +
-      (S.uid ? ' Your hauls and minutes per craft are yours alone.' : '') + '</p>';
-    h += '<div class="filters"><div class="field"><label for="gq">Find a material</label><input id="gq" class="in" type="search" value="' + esc(UI.gatherQ) + '" data-inp="gq" placeholder="e.g. Odyle, Ore, Ruby" autocomplete="off"></div>' +
+    const top = f => Math.max(isFinite(f.sellHour) ? f.sellHour : -Infinity, isFinite(f.craftHour) ? f.craftHour : -Infinity);
+    const bestNet = f => Math.max.apply(null, f.grades.map(g => g.net || 0));
+    const rows = (show === 'mine' ? mine : nodes).filter(f => !q || f.grades.some(g => loose(g.it.name).indexOf(q) >= 0))
+      .sort((a, b) => (top(b) - top(a)) || (bestNet(b) - bestNet(a)) || a.name.localeCompare(b.name));
+    const B = myBudget(), levelsSet = Object.keys(myLevels()).length > 0;
+    let h = gatherLead(C, nodes, tC);
+    h += '<p class="help">Gathering depends on things this page can’t know: how fast nodes respawn, other players taking them, failed extractions, double harvests and tier-ups. So it uses what you actually get. Open a node, gather it for a while, then log how long it took and how many of each grade you got. Every session adds to the averages. ' +
+      'Figures are Kina per hour of your time, after ' + feesTxt() + '. <strong>Craft the best</strong> crafts the grades worth more crafted and adds your minutes per craft to the hour. Each craft’s other materials are bought, or counted at their sell price if you gather them too. It assumes the market buys everything at today’s price.' +
+      (levelsSet ? ' Only crafts your levels allow are counted' + (B ? ', and only ones your ' + compact(B) + ' budget covers.' : '.') : B ? ' Only crafts your ' + compact(B) + ' budget covers are counted.' : ' Set a budget on Rankings to count only crafts you can afford.') +
+      (S.uid ? ' Your sessions and minutes per craft are yours alone.' : '') + '</p>';
+    h += '<div class="filters"><div class="field"><label for="gq">Find a material</label><input id="gq" class="in" type="search" value="' + esc(UI.gatherQ) + '" data-inp="gq" placeholder="e.g. Odyle, Ore, Sapphire" autocomplete="off"></div>' +
       '<div class="field narrow"><label for="g-craft">My minutes per craft</label><input id="g-craft" class="in num" inputmode="decimal" value="' + (tC ? esc(NF2.format(tC)) : '') + '" data-chg="g-craft" placeholder="e.g. 2" autocomplete="off"></div>' +
-      '<div class="seg" role="group" aria-label="Which materials"><button data-act="g-show" data-v="mine" aria-pressed="' + (show === 'mine') + '">I gather</button><button data-act="g-show" data-v="all" aria-pressed="' + (show === 'all') + '">All raw materials</button></div></div>';
-    if (show === 'all') h += '<p class="help">Every material a recipe uses that no recipe makes. Some are drops rather than gathered, so tick the ones you gather.</p>';
+      '<div class="seg" role="group" aria-label="Which nodes"><button data-act="g-show" data-v="mine" aria-pressed="' + (show === 'mine') + '">I gather</button><button data-act="g-show" data-v="all" aria-pressed="' + (show === 'all') + '">All raw materials</button></div></div>';
+    if (show === 'all') h += '<p class="help">Every material a recipe uses that no recipe makes, with the grades of one material together. Some are drops rather than gathered, so tick the ones you gather.</p>';
     if (!rows.length) {
       return h + '<section class="empty"><h2 class="sec-h">' + (q ? 'No materials match' : show === 'mine' ? 'You don’t gather anything yet' : 'No raw materials yet') + '</h2><p>' +
-        (q ? 'Clear the search to see every material.' : show === 'mine' ? 'Switch to <strong>All raw materials</strong> and tick what you gather, or enter how many you get in an hour.' : 'Raw materials show up here once a recipe uses them.') + '</p></section>';
+        (q ? 'Clear the search to see every material.' : show === 'mine' ? 'Switch to <strong>All raw materials</strong> and tick what you gather, or open one and log a session.' : 'Raw materials show up here once a recipe uses them.') + '</p></section>';
     }
-    const gainTxt = (b, g) => g.net == null ? sk(b.gain) + ' Kina per craft'
-      : (b.gain >= 0 ? sk(b.gain) + ' per craft over' : k(-b.gain) + ' per craft less than') + ' selling the ' + qfmt(b.qty) + ' it uses';
-    h += '<div class="well"><table class="grid gath"><thead><tr><th scope="col">Material</th><th class="num" scope="col">Sells for</th><th class="num w-num" scope="col">Gathered per hour</th>' +
-      '<th class="num" scope="col">Selling raw</th><th scope="col">Best craft for it</th><th class="num" scope="col">Crafting it</th></tr></thead><tbody>';
-    for (const g of rows) {
-      const id = esc(g.id), open = UI.gOpen === g.id, b = g.best;
+    h += '<div class="well"><table class="grid gath"><thead><tr><th scope="col">Node</th><th class="num" scope="col">Time logged</th><th class="num" scope="col">You get per hour</th>' +
+      '<th class="num" scope="col">Sell it all</th><th class="num" scope="col">Craft the best</th></tr></thead><tbody>';
+    for (const f of rows) {
+      const key = esc(f.key), open = UI.gOpen === f.key;
       const tags = [];
-      if (priceInfo(g.it).doubtful) tags.push(['warn', 'Ignoring a doubtful price']);
-      if (b && isFinite(b.hour) && isFinite(g.rawHour)) tags.push(b.hour > g.rawHour ? ['craft', 'Craft it'] : ['gather', 'Sell it raw']);
-      else if (b && g.net != null) tags.push(b.gain > 0 ? ['craft', 'Worth more crafted'] : ['gather', 'Worth more raw']);
+      if (f.grades.some(g => priceInfo(g.it).doubtful)) tags.push(['warn', 'Ignoring a doubtful price']);
+      if (f.unpriced.length) tags.push(['warn', plural(f.unpriced.length, 'grade') + ' without a price']);
+      if (f.plan) tags.push(f.plan.steps.length ? ['craft', 'Craft some'] : ['gather', 'Sell it all']);
+      const mix = f.got && f.grades.length > 1 ? f.grades.filter(g => g.got).map(g => nodeGrade(g.it.name) + ' ' + pct(g.got / f.got, 0)).join(' · ') : '';
       h += '<tr class="row' + (open ? ' open' : '') + '">' +
-        '<td class="c-name"><div class="gname">' + gatherBox(g.id) + '<button class="rname" data-act="g-open" data-id="' + id + '" aria-expanded="' + open + '" aria-controls="gd-' + id + '">' + nameHTML(g.id) + '</button></div>' +
-        '<div class="rmeta"><span>Used in ' + plural(g.n, 'recipe') + '</span>' + tagList(tags) + '</div></td>' +
-        '<td class="num" data-label="Sells for"><div class="v">' + (g.net != null ? k(g.net) : '—') + '</div>' + priceLine(g.id, 'Listed ') + '</td>' +
-        '<td class="num" data-label="Gathered per hour"><input id="gr-' + id + '" class="cell-in num" inputmode="decimal" value="' + (g.R ? esc(NF2.format(g.R)) : '') + '" placeholder="—" data-chg="g-rate" data-id="' + id + '" aria-label="How many ' + esc(g.it.name) + ' you gather in an hour"></td>' +
-        '<td class="num" data-label="Selling raw"><div class="v ' + tone(g.rawHour) + '">' + (isFinite(g.rawHour) ? sk(g.rawHour) : '—') + '</div><div class="sub">' + (isFinite(g.rawHour) ? 'Kina per hour' : g.net == null ? 'no price' : 'enter your haul') + '</div></td>' +
-        '<td data-label="Best craft for it">' + (b ? '<button class="linkbtn" data-act="goto-recipe" data-id="' + esc(b.row.r.id) + '">' + nameHTML(b.row.r.output) + '</button><div class="sub">' + gainTxt(b, g) + '</div>'
-          : '<div class="v muted">—</div><div class="sub">no craft has all its prices</div>') + '</td>' +
-        '<td class="num" data-label="Crafting it"><div class="v ' + tone(b ? b.hour : NaN) + '">' + (b && isFinite(b.hour) ? sk(b.hour) : '—') + '</div><div class="sub">' +
-          (!b ? '' : isFinite(b.hour) ? 'Kina per hour' : !tC ? 'enter minutes per craft' : 'enter your haul') + '</div></td></tr>';
-      if (open) h += '<tr class="detail" id="gd-' + id + '"><td colspan="6">' + gatherDetail(g, tC) + '</td></tr>';
+        '<td class="c-name"><div class="gname"><input type="checkbox" class="check" data-chg="gather-node" data-ids="' + esc(f.ids.join(' ')) + '"' + (f.grades.some(g => isGathered(g.it)) ? ' checked' : '') +
+          ' aria-label="I gather ' + esc(f.name) + '" title="I gather this myself">' +
+        '<button class="rname" data-act="g-open" data-id="' + key + '" aria-expanded="' + open + '" aria-controls="gd-' + key + '">' + nameHTML(f.key) + '</button></div>' +
+        '<div class="rmeta"><span>' + (f.grades.length > 1 ? esc(f.grades.map(g => nodeGrade(g.it.name)).join(', ')) : 'One grade') + '</span>' + tagList(tags) + '</div></td>' +
+        '<td class="num" data-label="Time logged"><div class="v">' + (f.minutes ? durTxt(f.minutes) : '—') + '</div><div class="sub">' + (f.runs.length ? plural(f.runs.length, 'session') : 'open it to log one') + '</div></td>' +
+        '<td class="num" data-label="You get per hour"><div class="v">' + (f.minutes ? qfmt(f.got * 60 / f.minutes) + ' items' : '—') + '</div><div class="sub">' + esc(mix) + '</div></td>' +
+        '<td class="num" data-label="Sell it all"><div class="v ' + tone(f.sellHour) + '">' + (isFinite(f.sellHour) ? sk(f.sellHour) : '—') + '</div><div class="sub">' + (isFinite(f.sellHour) ? 'Kina per hour' : 'log a session') + '</div></td>' +
+        '<td class="num" data-label="Craft the best"><div class="v ' + tone(f.plan && f.plan.steps.length ? f.craftHour : NaN) + '">' + (f.plan && f.plan.steps.length ? sk(f.craftHour) : '—') + '</div><div class="sub">' +
+          (f.plan ? (f.plan.steps.length ? 'Kina per hour' : 'selling pays more') : !f.minutes ? 'log a session' : 'enter minutes per craft') + '</div></td></tr>';
+      if (open) h += '<tr class="detail" id="gd-' + key + '"><td colspan="5">' + nodeDetail(f, tC) + '</td></tr>';
     }
     return h + '</tbody></table></div>';
   }
-  function gatherDetail(g, tC) {
-    const name = esc(g.it.name), shown = g.crafts.slice(0, 12);
-    let h = '<div class="dcard"><h4>Every craft that uses ' + name + '</h4>';
-    if (!shown.length) h += '<p class="help">No recipe that uses it has all its prices yet' + (Object.keys(myLevels()).length ? ', or your levels don’t allow it' : '') + '.</p>';
-    else {
-      h += '<div class="mini-well"><table class="mini"><thead><tr><th>Craft</th><th class="num">Uses</th><th class="num">Over selling raw</th><th class="num">Kina per hour</th></tr></thead><tbody>' +
-        shown.map(c => '<tr><td><button class="linkbtn" data-act="goto-recipe" data-id="' + esc(c.row.r.id) + '">' + nameHTML(c.row.r.output) + '</button></td><td class="num">' + qfmt(c.qty) + '</td>' +
-          '<td class="num ' + tone(c.gain) + '">' + sk(c.gain) + '</td><td class="num ' + tone(c.hour) + '">' + (isFinite(c.hour) ? sk(c.hour) : '—') + '</td></tr>').join('') + '</tbody></table></div>' +
-        (g.crafts.length > shown.length ? '<p class="note">The best ' + shown.length + ' of ' + g.crafts.length + '.</p>' : '');
-    }
-    h += '<p class="note">' + (isFinite(g.rawHour) ? 'Selling raw: ' + k(g.R) + ' an hour × ' + k(g.net) + ' each after fees = ' + sk(g.rawHour) + ' Kina per hour. ' : '') +
-      '<strong>Over selling raw</strong> is a craft’s expected profit minus what the ' + name + ' it uses would sell for. <strong>Kina per hour</strong> is its profit with your ' + name +
-      ' free, divided by the time to gather what it uses plus ' + (tC ? 'your ' + qfmt(tC) + ' min' : 'your minutes') + ' per craft. Failed crafts are priced in.</p></div>';
-    return h;
+  function nodeDetail(f, tC) {
+    const key = esc(f.key), name = esc(f.name), multi = f.grades.length > 1;
+    const label = g => multi ? nodeGrade(g.it.name) : g.it.name;
+    const d = UI.runDraft && UI.runDraft.f === f.key ? UI.runDraft : { m: '', n: {} };
+    const log = '<div class="dcard"><h4>Log a session</h4><p class="help">Gather ' + name + ' for a while, then enter how long it took and how many ' + (multi ? 'of each grade ' : '') + 'you got. Failed extractions, contested nodes, travel, double harvests and tier-ups are all in that count.</p>' +
+      '<div class="runform"><div class="field"><label for="rm-' + key + '">Time spent</label><input id="rm-' + key + '" class="in num" data-inp="run" data-f="' + key + '" data-k="m" value="' + esc(d.m) + '" placeholder="25 or 1h 10m" autocomplete="off"></div>' +
+      f.grades.map((g, i) => '<div class="field"><label for="rn-' + key + '-' + i + '">' + nameHTML(g.id) + '</label><input id="rn-' + key + '-' + i + '" class="in num" inputmode="numeric" data-inp="run" data-f="' + key + '" data-k="' + esc(g.id) + '" value="' + esc(d.n[g.id] || '') + '" placeholder="0" autocomplete="off"></div>').join('') +
+      '</div><div class="row-gap"><button class="btn primary" data-act="run-add" data-f="' + key + '" data-ids="' + esc(f.ids.join(' ')) + '">Add session</button></div></div>';
+    const got = r => f.grades.filter(g => r.n[g.id]).map(g => NF0.format(r.n[g.id]) + ' ' + label(g)).join(', ') || 'nothing';
+    const sessions = '<div class="dcard"><h4>Your sessions</h4>' + (f.runs.length
+      ? '<div class="mini-well"><table class="mini"><thead><tr><th>When</th><th class="num">Time</th><th>You got</th><th><span class="sr">Delete</span></th></tr></thead><tbody>' +
+        f.runs.map(r => '<tr><td>' + esc(r.t ? when(r.t) : '—') + '</td><td class="num">' + durTxt(r.m) + '</td><td>' + esc(got(r)) + '</td>' +
+          '<td><button class="btn small ghost" data-act="run-del" data-f="' + key + '" data-t="' + r.t + '" aria-label="Delete the session from ' + esc(r.t ? when(r.t) : 'an unknown date') + '">Delete</button></td></tr>').join('') +
+        '</tbody></table></div><p class="note">' + plural(f.got, 'item') + ' in ' + durTxt(f.minutes) + '. When your gathering level or skills go up, delete older sessions so the averages match how you gather now.</p>'
+      : '<p class="help">None yet. A session of 15 minutes or more gives a steadier average.</p>') + '</div>';
+    let hour = '<div class="dcard"><h4>An hour of ' + name + '</h4>';
+    if (!f.minutes) hour += '<p class="help">Log a session to see what an hour is worth.</p>';
+    hour += '<div class="mini-well"><table class="mini wide"><thead><tr><th>' + (multi ? 'Grade' : 'Material') + '</th><th class="num">Per hour</th><th class="num">Each, after fees</th><th class="num">Kina per hour</th><th>Best craft for it</th></tr></thead><tbody>' +
+      f.grades.map(g => '<tr><td>' + nameHTML(g.id) + '</td><td class="num">' + (f.minutes ? qfmt(g.perHour) : '—') + '</td><td class="num">' + (g.net != null ? k(g.net) : 'no price') + '</td>' +
+        '<td class="num">' + (f.minutes && g.net != null ? sk(g.perHour * g.net) : '—') + '</td>' +
+        '<td>' + (g.best ? '<button class="linkbtn" data-act="goto-recipe" data-id="' + esc(g.best.row.r.id) + '">' + nameHTML(g.best.row.r.output) + '</button><div class="sub ' + tone(g.best.gain) + '">' + sk(g.best.gain) + ' a craft over selling the ' + qfmt(g.best.qty) + ' it uses</div>' : '<span class="muted">no priced craft</span>') + '</td></tr>').join('') +
+      (f.minutes ? '<tr><td><strong>Sell it all</strong></td><td class="num">' + qfmt(f.got * 60 / f.minutes) + '</td><td></td><td class="num ' + tone(f.sellHour) + '"><strong>' + sk(f.sellHour) + '</strong></td><td></td></tr>' : '') +
+      '</tbody></table></div>';
+    if (f.plan && f.plan.steps.length) {
+      hour += '<p class="note"><strong>Craft the best:</strong> from an hour’s haul, craft ' + f.plan.steps.map(s => qfmt(s.n) + ' × <button class="linkbtn" data-act="goto-recipe" data-id="' + esc(s.c.row.r.id) + '">' + esc(itemName(s.c.row.r.output)) + '</button> from your ' + esc(label(s.g)) + ' (' + sk(s.c.gain) + ' each over selling)').join(', ') +
+        ' and sell the rest. At ' + qfmt(tC) + ' min per craft that’s ' + sk(f.plan.kina) + ' Kina in ' + durTxt(f.plan.hours * 60) + ', or ' + sk(f.plan.hour) + ' an hour.</p>';
+    } else if (f.plan) hour += '<p class="note">No craft earns more per hour of crafting than selling this haul does, so sell it all.</p>';
+    else if (f.minutes) hour += '<p class="note">Enter your minutes per craft above to see whether crafting part of the haul pays more.</p>';
+    hour += '</div>';
+    return hour + '<div class="ngrid">' + log + sessions + '</div>';
   }
 
   function settingsView() {
@@ -1900,7 +1985,7 @@
       '</tbody></table></div></details></section>';
     const exists = hasExamples();
     h += '<section class="panel"><h2 class="sec-h">Your data</h2><p class="help">' +
-      (S.mode === 'db' ? 'Prices, price history and recipe edits are saved in the shared price book, so every member sees the same prices. Your crafting levels, what you gather, your hauls per hour and your minutes per craft are saved to your own account.' : 'Prices, price history, recipe edits, crafting levels and gathering hauls are saved in this browser only. Export them to keep a copy or move them to another device.') +
+      (S.mode === 'db' ? 'Prices, price history and recipe edits are saved in the shared price book, so every member sees the same prices. Your crafting levels, what you gather, your gathering sessions and your minutes per craft are saved to your own account.' : 'Prices, price history, recipe edits, crafting levels and gathering sessions are saved in this browser only. Export them to keep a copy or move them to another device.') +
       (CAT.recipes.length ? ' The ' + NF0.format(CAT.recipes.length) + ' built-in recipes come from AION2 Hub’s Global client pages' + (CAT.built ? ', read ' + esc(CAT.built) : '') + '.' : '') + '</p>' +
       '<div class="io"><div class="field"><span class="lbl">Export</span>' +
       (UI.io.exportText ? '<textarea id="io-out" class="in" rows="7" readonly>' + esc(UI.io.exportText) + '</textarea><div class="row-gap"><button class="btn" data-act="io-copy">Copy</button><button class="btn ghost" data-act="io-hide">Hide</button></div>'
@@ -1921,8 +2006,9 @@
       '<li>A Splendent material can also come from a combo: craft its base item until it procs, and sell the normal items made along the way. Its cost is the materials for those crafts, minus what the normal items sell for, divided by the Splendent chance per craft. The Splendent view in Rankings lists these costs.</li>' +
       '<li><strong>Buying all mats</strong> ignores gathering. <strong>With own gathering</strong> sets gatherable materials to 0 Kina. <strong>Gain vs selling raw</strong> sets them to what they would sell for after the fee. If it’s above zero, crafting is worth more than selling the materials.</li>' +
       '<li><strong>Break-even list price</strong> is the lowest price you can list the item at without losing Kina.</li></ul>' +
-      '<h3>Gathering</h3><ul><li><strong>Gather and sell</strong> = how many you gather in an hour × the market price after fees.</li>' +
-      '<li><strong>Gather and craft</strong> = a craft’s expected profit with the gathered material free, divided by the time to gather what it uses plus your minutes per craft. Its other materials are bought, or counted at their sell price if you gather them too.</li>' +
+      '<h3>Gathering</h3><ul><li>A node’s grades are counted together, since one node can give any of them. <strong>Per hour</strong> = what your logged sessions got ÷ the time they took.</li>' +
+      '<li><strong>Sell it all</strong> = each grade per hour × its market price after fees.</li>' +
+      '<li><strong>Craft the best</strong> takes the crafts that pay most over selling their materials, and adds them while each earns more per hour of crafting than the hour so far. Your minutes per craft are added to the hour. A craft’s other materials are bought, or counted at their sell price if you gather them too.</li>' +
       '<li><strong>Buy and craft</strong> = the best expected profit with every material bought, × 60 ÷ your minutes per craft.</li></ul>' +
       '<h3>Not counted</h3><ul><li>Listing fees paid in bound Kina. Your time, except on the Gathering tab. Price drops when you list many items at once, which matters most when you sell a lot of gathered materials.</li></ul></div></section>';
     return h;
@@ -2093,9 +2179,13 @@
     for (const p of Object.keys(lv)) setLevel(p, lv[p]);
     if (Array.isArray(d.myGather)) for (const id of d.myGather) gathered.push(idMap.get(String(id)) || null);
     if (S.uid) setGather(gathered.filter(Boolean), true);
-    const rates = readRates(d.myRates), moved = {};
-    for (const id of Object.keys(rates)) { const to = mapId(id); if (to) moved[to] = rates[id]; }
-    if (Object.keys(moved).length) setRates(moved);
+    const have = myRuns(), runs = [];
+    for (const r of readRuns(d.myRuns)) {
+      const f = mapId(r.f), n = {};
+      for (const id of Object.keys(r.n)) { const to = mapId(id); if (to) n[to] = r.n[id]; }
+      if (f && !have.some(x => x.f === f && x.t === r.t)) runs.push({ f: f, m: r.m, n: n, t: r.t });
+    }
+    if (runs.length) setRuns(have.concat(runs));
     if (num(d.myCraftMin) > 0) setCraftMin(num(d.myCraftMin));
     return 'Imported' + plural(ni, 'new item') + ' and ' + plural(nr, 'recipe') + '.';
   }
@@ -2109,6 +2199,20 @@
     'goto-recipe': t => { const r = getRecipe(t.dataset.id); if (!r) return; UI.tab = 'rank'; UI.goal = 'normal'; UI.prof = 'all'; UI.rankQ = itemName(r.output); UI.open = r.id; UI.rankShow = PAGE; saveUI(); render(); window.scrollTo({ top: 0 }); },
     'g-show': t => { UI.gatherShow = t.dataset.v; UI.gOpen = null; saveUI(); render(); },
     'g-open': t => { UI.gOpen = UI.gOpen === t.dataset.id ? null : t.dataset.id; render(); },
+    'run-add': t => {
+      const f = t.dataset.f, d = runDraft(f), m = minutesIn(d.m), n = {};
+      if (!(m > 0 && m <= 1440)) { toast('Enter how long you gathered, like 25, 1h or 1h 20m.'); return; }
+      for (const id of t.dataset.ids.split(' ')) {
+        const raw = String(d.n[id] || '').trim(), c = raw === '' ? 0 : num(raw);
+        if (!(c >= 0 && c < 1e6)) { toast('Enter how many of each grade you got, or leave it blank for none.'); return; }
+        if (c > 0) n[id] = Math.round(c);
+      }
+      setRuns(myRuns().concat({ f: f, m: m, n: n, t: Date.now() }));
+      UI.runDraft = null;
+      toast('Logged ' + durTxt(m) + ' of ' + itemName(f) + '.');
+      render();
+    },
+    'run-del': t => { const ts = +t.dataset.t; setRuns(myRuns().filter(r => !(r.f === t.dataset.f && r.t === ts))); toast('Deleted that session.'); render(); },
     prof: t => { UI.prof = t.dataset.p; UI.rankShow = PAGE; saveUI(); render(); },
     toggle: t => { const id = t.dataset.id; UI.open = UI.open === id ? null : id; render(); },
     'rank-more': () => { UI.rankShow += PAGE; render(); },
@@ -2191,7 +2295,7 @@
     'paste-clear': () => { UI.shots.pasteText = ''; UI.shots.pasteNote = ''; if (UI.shots.source === 'paste') UI.shots.market = null; render(); },
     'shot-discard': () => { UI.shots.market = null; UI.shots.error = ''; render(); },
     'shot-apply': () => applyMarket(),
-    'io-export': () => { UI.io.exportText = JSON.stringify({ app: 'kina-ledger', version: 3, exportedAt: new Date().toISOString(), settings: S.settings, myLevels: myLevels(), myGather: S.uid ? [...myGather()] : null, myRates: myRates(), myCraftMin: myCraftMin(), items: [...S.items.values()], recipes: [...S.recipes.values()] }, null, 2); render(); },
+    'io-export': () => { UI.io.exportText = JSON.stringify({ app: 'kina-ledger', version: 3, exportedAt: new Date().toISOString(), settings: S.settings, myLevels: myLevels(), myGather: S.uid ? [...myGather()] : null, myRuns: myRuns(), myCraftMin: myCraftMin(), items: [...S.items.values()], recipes: [...S.recipes.values()] }, null, 2); render(); },
     'io-hide': () => { UI.io.exportText = ''; render(); },
     'io-copy': () => {
       const fallback = () => { const ta = document.getElementById('io-out'); if (ta) { ta.focus(); ta.select(); } toast('Press Ctrl+C to copy the selected text.'); };
@@ -2232,12 +2336,7 @@
       saveUI(); later();
     },
     'gather-toggle': t => { setGather([t.dataset.id], t.checked); later(); },
-    'g-rate': t => {
-      const raw = t.value.trim(), v = raw === '' ? null : num(raw);
-      if (raw !== '' && !(v > 0 && v < 1e7)) { toast('Enter how many you gather in an hour, like 120 or 1.5k.'); later(); return; }
-      if (getItem(t.dataset.id)) setRates({ [t.dataset.id]: v });
-      later();
-    },
+    'gather-node': t => { setGather(t.dataset.ids.split(' '), t.checked); later(); },
     'g-craft': t => {
       const raw = t.value.trim(), v = raw === '' ? null : num(raw);
       if (raw !== '' && !(v > 0 && v <= 10000)) { toast('Enter the minutes one craft takes you, like 2 or 0.5.'); later(); return; }
@@ -2288,6 +2387,7 @@
     pq: t => { UI.priceQuery = t.value; UI.priceShow = 100; render(); },
     rq: t => { UI.rankQ = t.value; UI.rankShow = PAGE; render(); },
     gq: t => { UI.gatherQ = t.value; render(); },
+    run: t => { const d = runDraft(t.dataset.f); if (t.dataset.k === 'm') d.m = t.value; else d.n[t.dataset.k] = t.value; },
     recq: t => { UI.recQ = t.value; UI.recShow = PAGE; render(); },
     'io-text': t => { UI.io.importText = t.value; },
     'paste-text': t => { UI.shots.pasteText = t.value; }
@@ -2305,6 +2405,7 @@
   document.addEventListener('keydown', e => {
     if (e.key !== 'Enter' || !e.target || !e.target.id) return;
     if (e.target.id === 'ni-name' || e.target.id === 'ni-price') { e.preventDefault(); addItem(); }
+    if (e.target.dataset && e.target.dataset.inp === 'run') { e.preventDefault(); const b = view.querySelector('button[data-act="run-add"]'); if (b) ACTIONS['run-add'](b); }
   });
 
   /* ---------- importing prices ---------- */
@@ -2357,7 +2458,7 @@
   function useLocal() {
     for (const stop of unsubs) stop();
     unsubs = [];
-    DB = null; S.mode = 'local'; S.role = 'owner'; S.uid = null; S.mine = null; S.myGather = null; S.myRates = null; S.myCraftMin = null;
+    DB = null; S.mode = 'local'; S.role = 'owner'; S.uid = null; S.mine = null; S.myGather = null; S.myRuns = null; S.myCraftMin = null;
     S.items = new Map(); S.recipes = new Map(); S.settings = mergeSettings(null);
     loadLocal();
     itemsVer++; recipesVer++;
@@ -2375,7 +2476,7 @@
     for (const stop of unsubs) stop();
     unsubs = [];
     S.auth = 'member'; S.role = member.role === 'owner' ? 'owner' : 'member';
-    DB = fs; S.mode = 'db'; S.uid = user.uid; S.mine = null; S.myGather = null; S.myRates = null; S.myCraftMin = null; S.ready = false;
+    DB = fs; S.mode = 'db'; S.uid = user.uid; S.mine = null; S.myGather = null; S.myRuns = null; S.myCraftMin = null; S.ready = false;
     S.items = new Map(); S.recipes = new Map();
     render();
     subscribe();
@@ -2383,7 +2484,7 @@
       const x = d.exists ? d.data() : null;
       S.mine = readLevels(x && x.levels);
       S.myGather = x && Array.isArray(x.gather) ? new Set(x.gather.filter(v => typeof v === 'string')) : null;
-      S.myRates = readRates(x && x.rates);
+      S.myRuns = readRuns(x && x.runs);
       S.myCraftMin = x && num(x.craftMin) > 0 ? num(x.craftMin) : null;
       itemsVer++;
       scheduleRender();
