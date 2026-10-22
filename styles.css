@@ -240,6 +240,11 @@ tr.detail > td { background: var(--sunk); padding: 16px; border-top: 0; }
 .live-found-txt { display: grid; gap: 8px; min-width: 0; flex: 1 1 220px; }
 .live-recent { margin: 4px 0 0; padding-left: 18px; font-size: 14px; display: grid; gap: 2px; }
 .steps { margin: 0; padding-left: 20px; display: grid; gap: 4px; font-size: 14px; }
+.kinds { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.kinds li { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
+.kinds select { width: min(260px, 100%); margin-left: auto; }
+.kind-icon { width: 40px; height: 40px; border-radius: 6px; border: 1px solid var(--line); image-rendering: auto; flex: none; background: var(--sunk); }
+.kind-txt { display: grid; gap: 2px; min-width: 0; }
 .ngrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; margin-top: 14px; }
 @media (max-width: 760px) { .ngrid { grid-template-columns: 1fr; } }
 .lead-stats dd.sub { font: 400 12px/1.3 var(--f-ui); color: var(--ink-3); }

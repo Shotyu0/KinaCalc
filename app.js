@@ -68,7 +68,7 @@
   const ID_RE = /^[A-Za-z0-9_\-.~:@+]{1,160}$/;
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
-  const BUILD = '2026-10-22d'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-10-22e'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -1905,7 +1905,8 @@
       (S.uid ? ' Your sessions and minutes per craft are yours alone.' : '') + '</p>';
     h += '<div class="filters"><div class="field"><label for="gq">Find a material</label><input id="gq" class="in" type="search" value="' + esc(UI.gatherQ) + '" data-inp="gq" placeholder="e.g. Odyle, Ore, Sapphire" autocomplete="off"></div>' +
       '<div class="field narrow"><label for="g-craft">My minutes per craft</label><input id="g-craft" class="in num" inputmode="decimal" value="' + (tC ? esc(NF2.format(tC)) : '') + '" data-chg="g-craft" placeholder="e.g. 2" autocomplete="off"></div>' +
-      '<div class="seg" role="group" aria-label="Which nodes"><button data-act="g-show" data-v="mine" aria-pressed="' + (show === 'mine') + '">I gather</button><button data-act="g-show" data-v="all" aria-pressed="' + (show === 'all') + '">All raw materials</button></div></div>';
+      '<div class="seg" role="group" aria-label="Which nodes"><button data-act="g-show" data-v="mine" aria-pressed="' + (show === 'mine') + '">I gather</button><button data-act="g-show" data-v="all" aria-pressed="' + (show === 'all') + '">All raw materials</button></div>' +
+      '<button class="btn primary" data-act="live-start"' + (!liveSupported() || UI.live.state !== 'off' ? ' disabled' : '') + ' title="' + (liveSupported() ? 'Counts every node you gather from a screen share' : 'Needs Edge or Chrome on a computer') + '">Track live</button></div>';
     if (show === 'all') h += '<p class="help">Every material a recipe uses that no recipe makes, with the grades of one material together. Some are drops rather than gathered, so tick the ones you gather.</p>';
     if (!rows.length) {
       return h + '<section class="empty"><h2 class="sec-h">' + (q ? 'No materials match' : show === 'mine' ? 'You don’t gather anything yet' : 'No raw materials yet') + '</h2><p>' +
@@ -1973,10 +1974,13 @@
 
   /* ---------- live gathering tracker ---------- */
   // Watches a screen share for the gathering popup. gather-worker.js does the reading, and keeps getting
-  // frames while the game covers this page; the page shows the totals and saves them as a session.
+  // frames while the game covers this page; the page shows the totals and saves them as sessions. Each
+  // extraction is matched to a kind of node by its item icon, so a route with several kinds of node is
+  // saved as one session per node. The clock runs from the moment the screen is shared.
   // States: off, asking (share prompt), calibrate (find the popup), tracking, finishing, review.
   const LS_BOX = 'kina-ledger:livebox:v1';
-  const LIVE_EMPTY = { stream: null, worker: null, ex: [], started: 0, ended: 0, pausedAt: 0, pausedMs: 0, reading: null, snap: null, rough: null, count: 0, timer: null, countTimer: null, finTimer: null, save: false };
+  const LS_ICONS = 'kina-ledger:itemicons:v1';
+  const LIVE_EMPTY = { stream: null, worker: null, ex: [], kinds: [], started: 0, ended: 0, pausedAt: 0, pausedMs: 0, reading: null, snap: null, rough: null, count: 0, timer: null, countTimer: null, finTimer: null, save: false };
   const LIVE = Object.assign({}, LIVE_EMPTY);
   function liveSupported() { return !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia && window.MediaStreamTrackProcessor && window.Worker && window.OffscreenCanvas); }
   // Where the popup sits on your screen, as fractions of the shared screen. Kept in this browser.
@@ -1987,10 +1991,60 @@
     } catch (_) { return null; }
   }
   function saveLiveBox(b) { try { localStorage.setItem(LS_BOX, JSON.stringify({ x: b.x, y: b.y, w: b.w, h: b.h })); } catch (_) {} }
+  // Item icons you've named, and their node. Kept in this browser.
+  function knownIcons() {
+    try {
+      const a = JSON.parse(localStorage.getItem(LS_ICONS) || '[]');
+      return Array.isArray(a) ? a.filter(x => x && typeof x.f === 'string' && Array.isArray(x.icon) && x.icon.length === 48) : [];
+    } catch (_) { return []; }
+  }
+  function rememberIcon(f, icon) {
+    const list = knownIcons().filter(x => GatherReader.iconDist(x.icon, icon) >= GatherReader.ICON_SAME);
+    list.push({ f: f, icon: icon });
+    try { localStorage.setItem(LS_ICONS, JSON.stringify(list.slice(-100))); } catch (_) {}
+  }
+  function iconNode(icon) {
+    let best = null, bd = GatherReader.ICON_SAME;
+    for (const x of knownIcons()) { const d = GatherReader.iconDist(x.icon, icon); if (d < bd) { bd = d; best = x.f; } }
+    return best;
+  }
+  function iconURL(px) {
+    if (!px) return null;
+    try {
+      const c = document.createElement('canvas');
+      c.width = px.w; c.height = px.h;
+      c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(px.data), px.w, px.h), 0, 0);
+      return c.toDataURL();
+    } catch (_) { return null; }
+  }
+  // The kind of node an extraction came from, found or added by its item icon. A new kind takes the node
+  // its icon was named as before, if any.
+  function kindFor(ex, px) {
+    let k = ex.icon ? LIVE.kinds.find(x => GatherReader.iconDist(x.icon, ex.icon) < GatherReader.ICON_SAME) : LIVE.kinds[LIVE.kinds.length - 1];
+    if (!k) {
+      const known = ex.icon ? iconNode(ex.icon) : null;
+      k = { id: LIVE.kinds.length, icon: ex.icon, img: null, f: known, sure: !!known, picked: false };
+      LIVE.kinds.push(k);
+    }
+    if (!k.img) k.img = iconURL(px);
+    return k;
+  }
+  // Kinds that finished at least one extraction, with their totals. Tracking started from a node gives that
+  // node to the unnamed kind with the most extractions, unless another kind is already that node. It's
+  // still shown for you to confirm the first time.
+  function liveKinds() {
+    const kinds = LIVE.kinds.map(k => ({ k: k, sum: GatherReader.summarize({ extractions: LIVE.ex.filter(e => e.kind === k.id), nodes: [] }, 0) })).filter(x => x.sum.x > 0);
+    if (UI.live.f && !kinds.some(x => x.k.f === UI.live.f)) {
+      const open = kinds.filter(x => !x.k.f && !x.k.picked).sort((a, b) => b.sum.x - a.sum.x)[0];
+      if (open) open.k.f = UI.live.f;
+    }
+    return kinds;
+  }
+  function liveName() { return UI.live.f ? itemName(UI.live.f) : 'gathering'; }
   async function liveStart(f) {
     if (!liveSupported()) { toast('Live tracking needs Edge or Chrome on a computer.'); return; }
     if (UI.live.state !== 'off') return;
-    UI.live = { state: 'asking', f: f, found: null, locating: false };
+    UI.live = { state: 'asking', f: f || null, found: null, locating: false };
     render();
     let stream;
     try { stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 10, max: 15 } }, audio: false }); }
@@ -1998,7 +2052,8 @@
     if (UI.live.state !== 'asking') { for (const t of stream.getTracks()) t.stop(); return; }
     const track = stream.getVideoTracks()[0], worker = new Worker('gather-worker.js');
     const processor = new MediaStreamTrackProcessor({ track: track });
-    Object.assign(LIVE, LIVE_EMPTY, { stream: stream, worker: worker, ex: [] });
+    Object.assign(LIVE, LIVE_EMPTY, { stream: stream, worker: worker, ex: [], kinds: [], started: Date.now() });
+    LIVE.timer = setInterval(liveTick, 1000);
     worker.onmessage = e => liveMsg(e.data);
     // "Stop sharing" in the browser's own bar ends the session too.
     track.addEventListener('ended', () => { if (UI.live.state === 'tracking' || UI.live.state === 'calibrate') liveStop(false); });
@@ -2007,14 +2062,10 @@
     if (box) liveTracking(); else { UI.live.state = 'calibrate'; render(); }
   }
   function liveTracking() {
-    if (!LIVE.started) LIVE.started = Date.now();
-    if (LIVE.pausedAt) { LIVE.pausedMs += Date.now() - LIVE.pausedAt; LIVE.pausedAt = 0; }
     UI.live.state = 'tracking';
-    clearInterval(LIVE.timer);
-    LIVE.timer = setInterval(liveTick, 1000);
     render();
   }
-  // Seconds tracked so far, leaving out pauses.
+  // Seconds since the screen was shared, leaving out pauses.
   function liveSecs() {
     if (!LIVE.started) return 0;
     const end = LIVE.ended || Date.now();
@@ -2047,6 +2098,7 @@
       LIVE.reading = m.r;
       liveTick();
     } else if (m.type === 'extraction') {
+      m.ex.kind = kindFor(m.ex, m.icon).id;
       LIVE.ex.push(m.ex);
       if (UI.live.state === 'tracking') scheduleRender();
     } else if (m.type === 'ended') liveFinished();
@@ -2061,35 +2113,59 @@
     LIVE.finTimer = setTimeout(liveFinished, 2000);
     render();
   }
+  // Saves straight away when every kind of node is one you've named before; otherwise asks first.
   function liveFinished() {
     if (UI.live.state !== 'finishing') return;
     clearTimeout(LIVE.finTimer);
     if (LIVE.worker) { LIVE.worker.terminate(); LIVE.worker = null; }
-    if (LIVE.save) { liveSave(); liveReset(); }
-    else if (LIVE.ex.length) UI.live.state = 'review';
-    else { liveReset(); toast('Tracking stopped. No gathering was seen.'); }
+    const kinds = liveKinds();
+    if (!kinds.length) { liveReset(); toast('Tracking stopped. No gathering was seen.'); }
+    else if (LIVE.save && kinds.every(x => x.k.sure && x.k.f)) { liveSave(); liveReset(); }
+    else UI.live.state = 'review';
     render();
   }
-  // Saves what was tracked as a session on the node: items by grade, time, and the counts behind the rates.
+  // Saves one session per node: its items by grade, its share of the time, and the counts behind its rates.
+  // Time is shared out by when things happened: each extraction counts its own length plus the gap before
+  // it (getting to the node), with gaps capped at 90 seconds so a break isn't charged to one node.
   function liveSave() {
-    const f = UI.live.f, secs = liveSecs(), sum = GatherReader.summarize({ extractions: LIVE.ex, nodes: [] }, secs);
-    if (!sum.x) { toast('Nothing was gathered, so there’s no session to save.'); return; }
-    const node = gatherCalc(buildCalc()).find(x => x.key === f), n = {};
-    let lost = 0;
-    for (const g of Object.keys(sum.byGrade)) {
-      const it = node && node.grades.find(x => nodeGrade(x.it.name) === g);
-      if (it) n[it.id] = (n[it.id] || 0) + sum.byGrade[g]; else lost += sum.byGrade[g];
+    const secs = liveSecs(), nodes = gatherCalc(buildCalc());
+    const ex = LIVE.ex.slice().sort((a, b) => a.start - b.start), kindOf = new Map(LIVE.kinds.map(k => [k.id, k]));
+    const byNode = new Map();
+    let prevEnd = null, total = 0, lost = 0;
+    for (const e of ex) {
+      const k = kindOf.get(e.kind), w = (prevEnd == null ? 0 : Math.min(90, Math.max(0, e.start - prevEnd))) + Math.max(0, e.end - e.start);
+      prevEnd = e.end; total += w;
+      if (!k || !k.f) continue;
+      if (!byNode.has(k.f)) byNode.set(k.f, { ex: [], w: 0, icons: [] });
+      const b = byNode.get(k.f);
+      b.ex.push(e); b.w += w;
+      if (k.icon && b.icons.indexOf(k.icon) < 0) b.icons.push(k.icon);
     }
-    const min = Math.min(1440, Math.max(0.1, Math.round(secs / 6) / 10));
-    setRuns(myRuns().concat({ f: f, m: min, n: n, t: Date.now(), st: { x: sum.x, ok: sum.ok, d: sum.d, u: sum.u, sec: Math.round(sum.sec) } }));
-    toast('Saved ' + durTxt(min) + ' of ' + itemName(f) + ': ' + plural(sum.items, 'item') + (lost ? '. ' + plural(lost, 'item') + ' of a grade this page didn’t recognize weren’t counted.' : '.'));
+    const runs = myRuns().slice(), saved = [], now = Date.now();
+    let i = 0;
+    for (const [f, b] of byNode) {
+      const sum = GatherReader.summarize({ extractions: b.ex, nodes: [] }, 0);
+      if (!sum.x) continue;
+      const node = nodes.find(x => x.key === f), n = {};
+      for (const g of Object.keys(sum.byGrade)) {
+        const it = node && node.grades.find(x => nodeGrade(x.it.name) === g);
+        if (it) n[it.id] = (n[it.id] || 0) + sum.byGrade[g]; else lost += sum.byGrade[g];
+      }
+      const min = Math.min(1440, Math.max(0.1, Math.round(secs * (total > 0 ? b.w / total : 1 / byNode.size) / 6) / 10));
+      runs.push({ f: f, m: min, n: n, t: now + i++, st: { x: sum.x, ok: sum.ok, d: sum.d, u: sum.u, sec: Math.round(sum.sec) } });
+      for (const icon of b.icons) rememberIcon(f, icon);
+      saved.push(durTxt(min) + ' of ' + itemName(f) + ' (' + plural(sum.items, 'item') + ')');
+    }
+    if (!saved.length) { toast('Nothing was saved.'); return; }
+    setRuns(runs);
+    toast('Saved ' + saved.join(' and ') + (lost ? '. ' + plural(lost, 'item') + ' of a grade this page didn’t recognize weren’t counted.' : '.'));
   }
   function liveReset() {
     clearInterval(LIVE.timer); clearInterval(LIVE.countTimer); clearTimeout(LIVE.finTimer);
     if (LIVE.stream) for (const t of LIVE.stream.getTracks()) t.stop();
     if (LIVE.worker) LIVE.worker.terminate();
     if (LIVE.snap) LIVE.snap.bmp.close();
-    Object.assign(LIVE, LIVE_EMPTY, { ex: [] });
+    Object.assign(LIVE, LIVE_EMPTY, { ex: [], kinds: [] });
     UI.live = { state: 'off' };
   }
   // A snapshot five seconds from now, so there's time to switch back to the game.
@@ -2105,10 +2181,10 @@
   }
   function liveNotice() {
     if (UI.live.state === 'off' || UI.tab === 'gather') return '';
-    return '<div class="notice"><span>' + (UI.live.state === 'review' ? 'Your tracked gathering of ' + esc(itemName(UI.live.f)) + ' isn’t saved yet.' : 'Tracking ' + esc(itemName(UI.live.f)) + ' live.') + '</span><button class="btn small" data-act="tab" data-tab="gather">Open Gathering</button></div>';
+    return '<div class="notice"><span>' + (UI.live.state === 'review' ? 'Your tracked gathering isn’t saved yet.' : 'Tracking ' + esc(liveName()) + ' live.') + '</span><button class="btn small" data-act="tab" data-tab="gather">Open Gathering</button></div>';
   }
   function liveHTML() {
-    const st = UI.live.state, name = esc(itemName(UI.live.f));
+    const st = UI.live.state, name = esc(liveName()), clock = '<span class="live-time" id="live-elapsed">' + clockTxt(liveSecs()) + '</span>';
     if (st === 'off') return '';
     if (st === 'asking') {
       return '<section class="panel live"><h2 class="sec-h">Track ' + name + ' live</h2><p class="help">In your browser’s sharing window, choose <strong>Entire screen</strong> and pick the screen the game is on. Sharing just the game window can show a frozen or black picture.</p>' +
@@ -2116,7 +2192,7 @@
     }
     if (st === 'calibrate') {
       const fd = UI.live.found, ok = !!(fd && fd.match >= 0.5 && fd.r && fd.r.present);
-      return '<section class="panel live"><h2 class="sec-h">Show the page where the gathering popup is</h2>' +
+      return '<section class="panel live"><div class="toolbar"><h2 class="sec-h">Show the page where the gathering popup is</h2>' + clock + '</div>' +
         '<ol class="steps"><li>In the game, start gathering a node so the gathering popup is showing.</li><li>Click <strong>Snapshot in 5 seconds</strong> and switch back to the game.</li>' +
         '<li>Back here, drag a box around the popup, from “Professional Lv.” down to the Fail bar. It doesn’t need to be exact. This is remembered in this browser.</li></ol>' +
         '<div class="row-gap"><button class="btn primary" data-act="live-snap"' + (LIVE.count ? ' disabled' : '') + '>' + (LIVE.count ? 'Snapshot in ' + LIVE.count + '…' : LIVE.snap ? 'New snapshot in 5 seconds' : 'Snapshot in 5 seconds') + '</button>' +
@@ -2126,28 +2202,44 @@
         (fd ? (ok ? '<div class="live-found"><canvas id="live-zoom" class="live-zoom" width="380" height="110" aria-hidden="true"></canvas><div class="live-found-txt"><p><strong>Found it.</strong> ' + esc(readingTxt(fd.r)) + '</p>' +
             '<div class="row-gap"><button class="btn primary" data-act="live-use">Use this and start tracking</button></div></div></div>'
           : '<p class="note loss">Couldn’t find the popup in that box. Check that it shows in the snapshot, then drag again or take a new snapshot.</p>') : '') +
-        '<p class="note">Your screen is read in this browser only. Nothing is recorded or sent anywhere.</p></section>';
+        '<p class="note">The clock started when you shared your screen. Your screen is read in this browser only; nothing is recorded or sent anywhere.</p></section>';
     }
-    const sum = GatherReader.summarize({ extractions: LIVE.ex, nodes: [] }, liveSecs()), paused = !!LIVE.pausedAt;
+    const kinds = liveKinds(), sum = GatherReader.summarize({ extractions: LIVE.ex, nodes: [] }, liveSecs()), paused = !!LIVE.pausedAt;
+    const naming = st === 'review' && kinds.some(x => !x.k.sure || !x.k.f);
     const stat = (l, v) => '<div class="stat"><dt>' + l + '</dt><dd>' + v + '</dd></div>';
-    const items = Object.keys(sum.byGrade).map(g => NF0.format(sum.byGrade[g]) + ' ' + esc(g)).join(' · ') || '0';
-    const recent = LIVE.ex.slice(-5).reverse().map(e => '<li>' + (e.result === 'success' ? esc(e.grade || 'Unrecognized grade') + ' ×' + e.qty + (e.tierUp ? ', tiered up' : '') : e.result === 'fail' ? '<span class="loss">Failed</span>' : 'Stopped early') +
+    const items = s => Object.keys(s.byGrade).map(g => NF0.format(s.byGrade[g]) + ' ' + esc(g)).join(' · ') || '0 items';
+    const icon = k => k.img ? '<img class="kind-icon" src="' + esc(k.img) + '" alt="">' : '<span class="kind-icon"></span>';
+    const recent = LIVE.ex.slice(-5).reverse().map(e => '<li>' + (kinds.length > 1 ? esc(kindLabel(LIVE.kinds[e.kind])) + ': ' : '') +
+      (e.result === 'success' ? esc(e.grade || 'Unrecognized grade') + ' ×' + e.qty + (e.tierUp ? ', tiered up' : '') : e.result === 'fail' ? '<span class="loss">Failed</span>' : 'Stopped early') +
       ' · ' + NF1.format(e.end - e.start) + ' s</li>').join('');
-    let h = '<section class="panel live"><div class="toolbar"><h2 class="sec-h">' + (st === 'review' ? 'Sharing stopped. Save this session?' : st === 'finishing' ? 'Finishing…' : (paused ? 'Paused: ' : 'Tracking ') + name) + '</h2>' +
-      '<span class="live-time" id="live-elapsed">' + clockTxt(liveSecs()) + '</span></div>' +
+    const title = st === 'review' ? (naming ? 'Which node was each?' : 'Sharing stopped. Save this session?') : st === 'finishing' ? 'Finishing…' : (paused ? 'Paused: ' : 'Tracking ') + (kinds.length > 1 ? 'a mixed route' : name);
+    let h = '<section class="panel live"><div class="toolbar"><h2 class="sec-h">' + title + '</h2>' + clock + '</div>' +
       (st === 'tracking' ? '<p class="live-status" id="live-status">' + esc(readingTxt(LIVE.reading)) + '</p>' : '') +
       '<dl class="statrow">' + stat('Extractions', NF0.format(sum.x)) + stat('Succeeded', sum.x ? pct(sum.ok / sum.x, 0) : '—') + stat('Doubled', sum.ok ? pct(sum.d / sum.ok, 0) : '—') +
-      stat('Tiered up', sum.x ? pct(sum.u / sum.x, 0) : '—') + stat('Per extraction', sum.x ? NF1.format(sum.sec / sum.x) + ' s' : '—') + stat('Items', items) + '</dl>' +
-      (recent ? '<div><span class="lbl">Latest</span><ul class="live-recent">' + recent + '</ul></div>' : '');
+      stat('Tiered up', sum.x ? pct(sum.u / sum.x, 0) : '—') + stat('Per extraction', sum.x ? NF1.format(sum.sec / sum.x) + ' s' : '—') + stat('Items', items(sum)) + '</dl>';
+    if (st === 'review') {
+      const opts = gatherCalc(buildCalc()).map(f => [f.key, f.name]).sort((a, b) => a[1].localeCompare(b[1]));
+      h += (naming ? '<p class="help">Pick the node for each item icon. It’s remembered in this browser, so next time these save on their own.</p>' : '') +
+        '<ul class="kinds">' + kinds.map(x => '<li>' + icon(x.k) + '<div class="kind-txt"><strong>' + plural(x.sum.x, 'extraction') + '</strong><span class="help">' + items(x.sum) + '</span></div>' +
+          '<select class="in" data-chg="live-kind" data-k="' + x.k.id + '" aria-label="Node for this icon"><option value="">Choose a node</option>' +
+          opts.map(([key, nm]) => '<option value="' + esc(key) + '"' + (x.k.f === key ? ' selected' : '') + '>' + esc(nm) + '</option>').join('') +
+          '<option value="-"' + (x.k.f === '-' ? ' selected' : '') + '>Don’t save these</option></select></li>').join('') + '</ul>';
+    } else if (kinds.length) {
+      h += '<ul class="kinds">' + kinds.map(x => '<li>' + icon(x.k) + '<div class="kind-txt"><strong>' + esc(kindLabel(x.k)) + '</strong><span class="help">' + plural(x.sum.x, 'extraction') + ' · ' + items(x.sum) + '</span></div></li>').join('') + '</ul>';
+    }
+    if (recent) h += '<div><span class="lbl">Latest</span><ul class="live-recent">' + recent + '</ul></div>';
     if (st === 'tracking') {
       h += '<div class="row-gap"><button class="btn primary" data-act="live-stop">Stop and save</button><button class="btn" data-act="live-pause">' + (paused ? 'Resume' : 'Pause') + '</button>' +
         '<button class="btn ghost" data-act="live-recal">Find the popup again</button><button class="btn ghost danger' + (UI.confirm === 'live-discard' ? ' armed' : '') + '" data-act="live-discard">' + (UI.confirm === 'live-discard' ? 'Click again to discard' : 'Discard') + '</button></div>' +
-        '<p class="note">Switch to the game whenever you like: tracking keeps going in the background, and closing this tab stops it. It counts whatever you gather, so stop before you move to another kind of node.</p>';
+        '<p class="note">Switch to the game whenever you like: tracking keeps going in the background, and closing this tab stops it. Gathering more than one kind of node? Each is told apart by its item icon and saved to its own node.</p>';
     } else if (st === 'review') {
-      h += '<div class="row-gap"><button class="btn primary" data-act="live-save">Save session</button><button class="btn ghost danger' + (UI.confirm === 'live-discard' ? ' armed' : '') + '" data-act="live-discard">' + (UI.confirm === 'live-discard' ? 'Click again to discard' : 'Discard') + '</button></div>';
+      const ready = kinds.every(x => x.k.f);
+      h += '<div class="row-gap"><button class="btn primary" data-act="live-save"' + (ready ? '' : ' disabled') + '>Save</button><button class="btn ghost danger' + (UI.confirm === 'live-discard' ? ' armed' : '') + '" data-act="live-discard">' + (UI.confirm === 'live-discard' ? 'Click again to discard' : 'Discard') + '</button>' +
+        (ready ? '' : '<span class="help">Choose a node for each icon first.</span>') + '</div>';
     }
     return h + '</section>';
   }
+  function kindLabel(k) { return !k ? '' : k.f && k.f !== '-' ? itemName(k.f) : k.f === '-' ? 'Not saved' : 'New node, named when you stop'; }
   // The snapshot with the box you're drawing (gold) and the popup it found (green), plus a close-up.
   function drawLive() {
     const s = LIVE.snap, cv = document.getElementById('live-snap');
@@ -2255,7 +2347,7 @@
       '<li><strong>Sell it all</strong> = each grade per hour × its market price after fees.</li>' +
       '<li><strong>Craft the best</strong> takes the crafts that pay most over selling their materials, and adds them while each earns more per hour of crafting than the hour so far. Your minutes per craft are added to the hour. A craft’s other materials are bought, or counted at their sell price if you gather them too.</li>' +
       '<li><strong>Buy and craft</strong> = the best expected profit with every material bought, × 60 ÷ your minutes per craft.</li>' +
-      '<li><strong>Track live</strong> reads the gathering popup from a screen share, in this browser only: when each extraction ends, whether the Success or Fail bar filled, the grade from the title color, and the ×2 orb of a double harvest. Tracked sessions also give the node its success, double and tier-up rates.</li></ul>' +
+      '<li><strong>Track live</strong> reads the gathering popup from a screen share, in this browser only: when each extraction ends, whether the Success or Fail bar filled, the grade from the title color, and the ×2 orb of a double harvest. The item icon tells kinds of node apart, so a route with several is saved as one session per node, with the time split by when each extraction happened. The clock runs from when you share your screen. Tracked sessions also give the node its success, double and tier-up rates.</li></ul>' +
       '<h3>Not counted</h3><ul><li>Listing fees paid in bound Kina. Your time, except on the Gathering tab. Price drops when you list many items at once, which matters most when you sell a lot of gathered materials.</li></ul></div></section>';
     return h;
   }
@@ -2470,8 +2562,6 @@
     'live-recal': () => {
       if (!LIVE.worker) return;
       LIVE.worker.postMessage({ type: 'box', box: null });
-      if (!LIVE.pausedAt) LIVE.pausedAt = Date.now();
-      clearInterval(LIVE.timer);
       UI.live.state = 'calibrate'; UI.live.found = null;
       render();
     },
@@ -2482,7 +2572,10 @@
       render();
     },
     'live-stop': () => liveStop(true),
-    'live-save': () => { liveSave(); liveReset(); render(); },
+    'live-save': () => {
+      if (!liveKinds().every(x => x.k.f)) { toast('Choose a node for each icon first.'); return; }
+      liveSave(); liveReset(); render();
+    },
     'live-discard': () => { if (LIVE.ex.length && !arm('live-discard')) return; liveReset(); render(); },
     'run-del': t => { const ts = +t.dataset.t; setRuns(myRuns().filter(r => !(r.f === t.dataset.f && r.t === ts))); toast('Deleted that session.'); render(); },
     prof: t => { UI.prof = t.dataset.p; UI.rankShow = PAGE; saveUI(); render(); },
@@ -2609,6 +2702,7 @@
     },
     'gather-toggle': t => { setGather([t.dataset.id], t.checked); later(); },
     'gather-node': t => { setGather(t.dataset.ids.split(' '), t.checked); later(); },
+    'live-kind': t => { const k = LIVE.kinds[+t.dataset.k]; if (k) { k.f = t.value || null; k.sure = !!t.value; k.picked = true; } later(); },
     'g-craft': t => {
       const raw = t.value.trim(), v = raw === '' ? null : num(raw);
       if (raw !== '' && !(v > 0 && v <= 10000)) { toast('Enter the minutes one craft takes you, like 2 or 0.5.'); later(); return; }

@@ -6,13 +6,20 @@
 importScripts('gather-reader.js');
 const R = self.GatherReader, W = R.REF_W, H = R.REF_H;
 const cv = new OffscreenCanvas(W, H), ctx = cv.getContext('2d', { willReadFrequently: true });
-let box = null, tr = null, paused = false, wantSnap = false, snap = null, lastPost = 0, lastT = 0;
+let box = null, tr = null, paused = false, wantSnap = false, snap = null, lastPost = 0, lastT = 0, itemPx = null;
 
-function newTracker() { tr = R.tracker({ onDone: ex => postMessage({ type: 'extraction', ex: ex }) }); }
+// Each finished extraction goes out with a picture of its item icon, taken while it was still Common.
+function newTracker() { tr = R.tracker({ onDone: ex => postMessage({ type: 'extraction', ex: ex, icon: itemPx }) }); }
 // Reads the popup box (fractions of the frame) from a frame or bitmap.
 function readBox(src, w, h, b) {
   ctx.drawImage(src, b.x * w, b.y * h, b.w * w, b.h * h, 0, 0, W, H);
-  return R.read({ w: W, h: H, ch: 4, data: ctx.getImageData(0, 0, W, H).data });
+  const r = R.read({ w: W, h: H, ch: 4, data: ctx.getImageData(0, 0, W, H).data });
+  if (r.present && r.grade === 'Common') {
+    const [x0, y0, x1, y1] = R.ITEM_BOX;
+    const img = ctx.getImageData(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+    itemPx = { w: img.width, h: img.height, data: img.data };
+  }
+  return r;
 }
 async function pump(readable) {
   const reader = readable.getReader();

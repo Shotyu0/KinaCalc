@@ -8,8 +8,12 @@
   const L = {
     sRow: 76, fRow: 93, barX0: 62, barX1: 362, scanX0: 116,
     sLabel: [64, 72, 110, 80], fLabel: [64, 89, 86, 97],
-    title: [18, 45, 230, 59], icon: [344, 40, 376, 66]
+    title: [18, 45, 230, 59], icon: [344, 40, 376, 66],
+    item: [25, 72, 50, 96]         // the item's own icon, left of the bars
   };
+  // Two item icons closer than this (average difference per color channel, 0-255) are the same item.
+  // The same icon reads within about 1 between frames; Fine and Common Orichalcum Ore differ by about 30.
+  const ICON_SAME = 14;
   // Title colors. Common is plain white; Fine is measured, the others are guesses until seen.
   const TITLE = [['Fine', [40, 190, 98]], ['Pure', [70, 150, 255]], ['Radiant', [255, 170, 40]]];
 
@@ -60,6 +64,28 @@
     }
     return { name: bd < 120 ? best : null, rgb: c };
   }
+  // The item icon as 4x4 cells of average color: 48 numbers.
+  function itemIcon(px) {
+    const b = L.item, cw = (b[2] - b[0] + 1) / 4, ch = (b[3] - b[1] + 1) / 4, out = [];
+    for (let gy = 0; gy < 4; gy++) for (let gx = 0; gx < 4; gx++) {
+      let r = 0, g = 0, bl = 0, k = 0;
+      for (let y = Math.floor(b[1] + gy * ch); y < b[1] + (gy + 1) * ch; y++) for (let x = Math.floor(b[0] + gx * cw); x < b[0] + (gx + 1) * cw; x++) {
+        const c = px(x, y); r += c[0]; g += c[1]; bl += c[2]; k++;
+      }
+      out.push(Math.round(r / k), Math.round(g / k), Math.round(bl / k));
+    }
+    return out;
+  }
+  function iconDist(a, b) {
+    if (!a || !b || a.length !== b.length) return Infinity;
+    let s = 0;
+    for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]);
+    return s / a.length;
+  }
+  function medianIcon(list) {
+    if (!list.length) return null;
+    return list[0].map((_, i) => { const v = list.map(x => x[i]).sort((p, q) => p - q); return v[v.length >> 1]; });
+  }
   // One frame of the popup box: { w, h, ch, data } with RGB (ch 3) or RGBA (ch 4) bytes.
   function read(f) {
     const px = reader(f), white = c => Math.min(c[0], c[1], c[2]) > 190;
@@ -67,7 +93,7 @@
     if (!(count(px, L.sLabel, white) >= 6 && count(px, L.fLabel, white) >= 3 && s.clean > 0.8 && fl.clean > 0.8)) return { present: false };
     const g = grade(px), span = (L.barX1 - L.scanX0) * 2;
     return {
-      present: true, s: s.frac, f: fl.frac, grade: g.name, gradeRgb: g.rgb,
+      present: true, s: s.frac, f: fl.frac, grade: g.name, gradeRgb: g.rgb, icon: itemIcon(px),
       orb: count(px, L.icon, c => c[1] > 120 && c[1] > c[0] + 35 && c[1] > c[2] + 25) >= 25,
       sDone: count(px, [L.scanX0, L.sRow - 2, L.barX1 - 4, L.sRow + 2], sDone) > span,
       fDone: count(px, [L.scanX0, L.fRow - 2, L.barX1 - 4, L.fRow + 2], fDone) > span
@@ -92,7 +118,9 @@
       cur.grade = mode(cur.grades.slice(-6).filter(Boolean)) || cur.firstGrade;
       cur.tierUp = !!(cur.firstGrade && cur.grade && cur.grade !== cur.firstGrade);
       cur.qty = cur.result === 'success' ? (cur.orb ? 2 : 1) : 0;
-      delete cur.grades;
+      // Which item this node gives: its icon while still Common, before any tier-up changes it.
+      cur.icon = medianIcon(cur.iconCommon.length ? cur.iconCommon : cur.iconOther);
+      delete cur.grades; delete cur.iconCommon; delete cur.iconOther;
       ex.push(cur);
       const node = nodes[nodes.length - 1];
       if (node && cur.start - node.lastEnd <= opts.nodeGap && node.ex.length < 3) { node.ex.push(cur); node.lastEnd = cur.end; }
@@ -106,9 +134,11 @@
       lastSeen = t;
       // Empty bars after a result: the next extraction at the same node has started.
       if (cur && cur.result && r.s < 0.25 && r.f < 0.25 && !r.sDone && !r.fDone) close(t);
-      if (!cur) cur = { start: t, firstGrade: r.grade, grades: [], orb: false, result: null, resultAt: null };
+      if (!cur) cur = { start: t, firstGrade: r.grade, grades: [], iconCommon: [], iconOther: [], orb: false, result: null, resultAt: null };
       if (!cur.firstGrade && r.grade) cur.firstGrade = r.grade;
       cur.grades.push(r.grade);
+      const icons = r.grade === 'Common' ? cur.iconCommon : cur.iconOther;
+      if (r.icon && icons.length < 40) icons.push(r.icon);
       if (!cur.result && (r.sDone || r.s >= opts.full)) { cur.result = 'success'; cur.resultAt = t; }
       else if (!cur.result && (r.fDone || r.f >= opts.full)) { cur.result = 'fail'; cur.resultAt = t; }
       if (cur.result === 'success' && r.orb) cur.orb = true;
@@ -229,6 +259,6 @@
     return { x: top.ox, y: top.oy, w: REF_W * top.s, h: REF_H * top.s, match: score(top.ox, top.oy, top.s, 'fine', true) };
   }
 
-  const api = { read: read, tracker: tracker, summarize: summarize, locate: locate, REF_W: REF_W, REF_H: REF_H };
+  const api = { read: read, tracker: tracker, summarize: summarize, locate: locate, iconDist: iconDist, ICON_SAME: ICON_SAME, ITEM_BOX: L.item, REF_W: REF_W, REF_H: REF_H };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.GatherReader = api;
 })(this);
