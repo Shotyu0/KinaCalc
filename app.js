@@ -68,7 +68,7 @@
   const ID_RE = /^[A-Za-z0-9_\-.~:@+]{1,160}$/;
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
-  const BUILD = '2026-10-22c'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-10-22d'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -1899,7 +1899,7 @@
       .sort((a, b) => (top(b) - top(a)) || (bestNet(b) - bestNet(a)) || a.name.localeCompare(b.name));
     const B = myBudget(), levelsSet = Object.keys(myLevels()).length > 0;
     let h = liveHTML() + gatherLead(C, nodes, tC);
-    h += '<p class="help">Gathering depends on things this page can’t know: how fast nodes respawn, other players taking them, failed extractions, double harvests and tier-ups. So it uses what you actually get. Open a node, gather it for a while, then log how long it took and how many of each grade you got. Every session adds to the averages. ' +
+    h += '<p class="help">Gathering depends on things this page can’t know: how fast nodes respawn, other players taking them, failed extractions, double harvests and tier-ups. So it uses what you actually get. Open a node, then either track it live from a screen share, or gather for a while and log how long it took and how many of each grade you got. Every session adds to the averages. ' +
       'Figures are Kina per hour of your time, after ' + feesTxt() + '. <strong>Craft the best</strong> crafts the grades worth more crafted and adds your minutes per craft to the hour. Each craft’s other materials are bought, or counted at their sell price if you gather them too. It assumes the market buys everything at today’s price.' +
       (levelsSet ? ' Only crafts your levels allow are counted' + (B ? ', and only ones your ' + compact(B) + ' budget covers.' : '.') : B ? ' Only crafts your ' + compact(B) + ' budget covers are counted.' : ' Set a budget on Rankings to count only crafts you can afford.') +
       (S.uid ? ' Your sessions and minutes per craft are yours alone.' : '') + '</p>';
@@ -1909,7 +1909,7 @@
     if (show === 'all') h += '<p class="help">Every material a recipe uses that no recipe makes, with the grades of one material together. Some are drops rather than gathered, so tick the ones you gather.</p>';
     if (!rows.length) {
       return h + '<section class="empty"><h2 class="sec-h">' + (q ? 'No materials match' : show === 'mine' ? 'You don’t gather anything yet' : 'No raw materials yet') + '</h2><p>' +
-        (q ? 'Clear the search to see every material.' : show === 'mine' ? 'Switch to <strong>All raw materials</strong> and tick what you gather, or open one and log a session.' : 'Raw materials show up here once a recipe uses them.') + '</p></section>';
+        (q ? 'Clear the search to see every material.' : show === 'mine' ? 'Switch to <strong>All raw materials</strong> and tick what you gather, or open one to log a session or track it live.' : 'Raw materials show up here once a recipe uses them.') + '</p></section>';
     }
     h += '<div class="well"><table class="grid gath"><thead><tr><th scope="col">Node</th><th class="num" scope="col">Time logged</th><th class="num" scope="col">You get per hour</th>' +
       '<th class="num" scope="col">Sell it all</th><th class="num" scope="col">Craft the best</th></tr></thead><tbody>';
@@ -1942,8 +1942,9 @@
       '<div class="runform"><div class="field"><label for="rm-' + key + '">Time spent</label><input id="rm-' + key + '" class="in num" data-inp="run" data-f="' + key + '" data-k="m" value="' + esc(d.m) + '" placeholder="25 or 1h 10m" autocomplete="off"></div>' +
       f.grades.map((g, i) => '<div class="field"><label for="rn-' + key + '-' + i + '">' + nameHTML(g.id) + '</label><input id="rn-' + key + '-' + i + '" class="in num" inputmode="numeric" data-inp="run" data-f="' + key + '" data-k="' + esc(g.id) + '" value="' + esc(d.n[g.id] || '') + '" placeholder="0" autocomplete="off"></div>').join('') +
       '</div><div class="row-gap"><button class="btn primary" data-act="run-add" data-f="' + key + '" data-ids="' + esc(f.ids.join(' ')) + '">Add session</button>' +
-      (liveSupported() ? '<button class="btn" data-act="live-start" data-f="' + key + '"' + (UI.live.state !== 'off' ? ' disabled' : '') + '>Track live instead</button>' : '') + '</div>' +
-      (liveSupported() ? '<p class="note"><strong>Track live</strong> shares your screen with this page, which counts each extraction as you gather. Nothing is recorded or sent anywhere.</p>' : '') + '</div>';
+      '<button class="btn" data-act="live-start" data-f="' + key + '"' + (!liveSupported() || UI.live.state !== 'off' ? ' disabled' : '') + '>Track live instead</button></div>' +
+      '<p class="note">' + (liveSupported() ? '<strong>Track live</strong> shares your screen with this page, which counts each extraction as you gather. Nothing is recorded or sent anywhere.'
+        : '<strong>Track live</strong> needs Edge or Chrome on a computer. This browser can’t read a screen share in the background.') + '</p></div>';
     const got = r => f.grades.filter(g => r.n[g.id]).map(g => NF0.format(r.n[g.id]) + ' ' + label(g)).join(', ') || 'nothing';
     const sessions = '<div class="dcard"><h4>Your sessions</h4>' + (f.runs.length
       ? '<div class="mini-well"><table class="mini"><thead><tr><th>When</th><th class="num">Time</th><th>You got</th><th><span class="sr">Delete</span></th></tr></thead><tbody>' +
