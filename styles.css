@@ -231,6 +231,15 @@ tr.detail > td { background: var(--sunk); padding: 16px; border-top: 0; }
 .gname { display: flex; align-items: center; gap: 8px; }
 .runform { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; }
 .mini.wide { min-width: 640px; }
+.live { border-color: var(--gold); }
+.live-time { font: 600 22px/1 var(--f-ui); font-variant-numeric: tabular-nums; }
+.live-status { font-size: 14px; color: var(--ink-2); }
+.live-snap { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 8px; cursor: crosshair; touch-action: none; }
+.live-found { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+.live-zoom { width: min(380px, 100%); height: auto; border: 1px solid var(--line); border-radius: 6px; }
+.live-found-txt { display: grid; gap: 8px; min-width: 0; flex: 1 1 220px; }
+.live-recent { margin: 4px 0 0; padding-left: 18px; font-size: 14px; display: grid; gap: 2px; }
+.steps { margin: 0; padding-left: 20px; display: grid; gap: 4px; font-size: 14px; }
 .ngrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; margin-top: 14px; }
 @media (max-width: 760px) { .ngrid { grid-template-columns: 1fr; } }
 .lead-stats dd.sub { font: 400 12px/1.3 var(--f-ui); color: var(--ink-3); }

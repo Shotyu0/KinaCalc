@@ -68,7 +68,7 @@
   const ID_RE = /^[A-Za-z0-9_\-.~:@+]{1,160}$/;
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
-  const BUILD = '2026-10-22b'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-10-22c'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -223,9 +223,17 @@
       const m = num(x.m), n = {};
       if (!(m > 0 && m <= 1440)) continue;
       if (x.n && typeof x.n === 'object') for (const id of Object.keys(x.n)) { const c = num(x.n[id]); if (ID_RE.test(id) && c >= 0 && c < 1e6) n[id] = c; }
-      out.push({ f: x.f, m: m, n: n, t: num(x.t) > 0 ? num(x.t) : 0 });
+      const st = readRunStats(x.st);
+      out.push(Object.assign({ f: x.f, m: m, n: n, t: num(x.t) > 0 ? num(x.t) : 0 }, st ? { st: st } : {}));
     }
     return out.slice(-RUNS_MAX);
+  }
+  // A tracked session's counts: extractions, successes, doubles, tier-ups, and seconds spent extracting.
+  function readRunStats(o) {
+    if (!o || typeof o !== 'object') return null;
+    const s = {};
+    for (const k of ['x', 'ok', 'd', 'u', 'sec']) { const v = num(o[k]); if (!(v >= 0 && v < 1e7)) return null; s[k] = v; }
+    return s;
   }
   function myRuns() { return S.uid ? (S.myRuns || []) : (S.settings.runs || []); }
   function myCraftMin() { const v = S.uid ? S.myCraftMin : S.settings.craftMin; return v > 0 ? v : null; }
@@ -258,6 +266,7 @@
   UI.newItem = { name: '', price: '', gather: false };
   UI.io = { exportText: '', importText: '', msg: '' };
   UI.confirm = null;
+  UI.live = { state: 'off' };
 
   let DB = null, AUTH = null, unsubs = [];
   let itemsVer = 0, recipesVer = 0;
@@ -1810,6 +1819,8 @@
         f.got += g.got;
       }
       f.unpriced = f.grades.filter(g => g.got > 0 && g.net == null);
+      const tracked = f.runs.filter(r => r.st);
+      f.track = tracked.length ? tracked.reduce((a, r) => ({ x: a.x + r.st.x, ok: a.ok + r.st.ok, d: a.d + r.st.d, u: a.u + r.st.u, sec: a.sec + r.st.sec }), { x: 0, ok: 0, d: 0, u: 0, sec: 0 }) : null;
       f.sellHour = f.minutes ? f.grades.reduce((s, g) => s + (g.net == null ? 0 : g.perHour * g.net), 0) : NaN;
       f.plan = f.minutes && tC ? craftPlan(f, tC) : null;
       f.craftHour = f.plan ? f.plan.hour : NaN;
@@ -1887,7 +1898,7 @@
     const rows = (show === 'mine' ? mine : nodes).filter(f => !q || f.grades.some(g => loose(g.it.name).indexOf(q) >= 0))
       .sort((a, b) => (top(b) - top(a)) || (bestNet(b) - bestNet(a)) || a.name.localeCompare(b.name));
     const B = myBudget(), levelsSet = Object.keys(myLevels()).length > 0;
-    let h = gatherLead(C, nodes, tC);
+    let h = liveHTML() + gatherLead(C, nodes, tC);
     h += '<p class="help">Gathering depends on things this page can’t know: how fast nodes respawn, other players taking them, failed extractions, double harvests and tier-ups. So it uses what you actually get. Open a node, gather it for a while, then log how long it took and how many of each grade you got. Every session adds to the averages. ' +
       'Figures are Kina per hour of your time, after ' + feesTxt() + '. <strong>Craft the best</strong> crafts the grades worth more crafted and adds your minutes per craft to the hour. Each craft’s other materials are bought, or counted at their sell price if you gather them too. It assumes the market buys everything at today’s price.' +
       (levelsSet ? ' Only crafts your levels allow are counted' + (B ? ', and only ones your ' + compact(B) + ' budget covers.' : '.') : B ? ' Only crafts your ' + compact(B) + ' budget covers are counted.' : ' Set a budget on Rankings to count only crafts you can afford.') +
@@ -1930,13 +1941,17 @@
     const log = '<div class="dcard"><h4>Log a session</h4><p class="help">Gather ' + name + ' for a while, then enter how long it took and how many ' + (multi ? 'of each grade ' : '') + 'you got. Failed extractions, contested nodes, travel, double harvests and tier-ups are all in that count.</p>' +
       '<div class="runform"><div class="field"><label for="rm-' + key + '">Time spent</label><input id="rm-' + key + '" class="in num" data-inp="run" data-f="' + key + '" data-k="m" value="' + esc(d.m) + '" placeholder="25 or 1h 10m" autocomplete="off"></div>' +
       f.grades.map((g, i) => '<div class="field"><label for="rn-' + key + '-' + i + '">' + nameHTML(g.id) + '</label><input id="rn-' + key + '-' + i + '" class="in num" inputmode="numeric" data-inp="run" data-f="' + key + '" data-k="' + esc(g.id) + '" value="' + esc(d.n[g.id] || '') + '" placeholder="0" autocomplete="off"></div>').join('') +
-      '</div><div class="row-gap"><button class="btn primary" data-act="run-add" data-f="' + key + '" data-ids="' + esc(f.ids.join(' ')) + '">Add session</button></div></div>';
+      '</div><div class="row-gap"><button class="btn primary" data-act="run-add" data-f="' + key + '" data-ids="' + esc(f.ids.join(' ')) + '">Add session</button>' +
+      (liveSupported() ? '<button class="btn" data-act="live-start" data-f="' + key + '"' + (UI.live.state !== 'off' ? ' disabled' : '') + '>Track live instead</button>' : '') + '</div>' +
+      (liveSupported() ? '<p class="note"><strong>Track live</strong> shares your screen with this page, which counts each extraction as you gather. Nothing is recorded or sent anywhere.</p>' : '') + '</div>';
     const got = r => f.grades.filter(g => r.n[g.id]).map(g => NF0.format(r.n[g.id]) + ' ' + label(g)).join(', ') || 'nothing';
     const sessions = '<div class="dcard"><h4>Your sessions</h4>' + (f.runs.length
       ? '<div class="mini-well"><table class="mini"><thead><tr><th>When</th><th class="num">Time</th><th>You got</th><th><span class="sr">Delete</span></th></tr></thead><tbody>' +
-        f.runs.map(r => '<tr><td>' + esc(r.t ? when(r.t) : '—') + '</td><td class="num">' + durTxt(r.m) + '</td><td>' + esc(got(r)) + '</td>' +
+        f.runs.map(r => '<tr><td>' + esc(r.t ? when(r.t) : '—') + (r.st ? ' <span class="tag gather">Tracked</span>' : '') + '</td><td class="num">' + durTxt(r.m) + '</td><td>' + esc(got(r)) + '</td>' +
           '<td><button class="btn small ghost" data-act="run-del" data-f="' + key + '" data-t="' + r.t + '" aria-label="Delete the session from ' + esc(r.t ? when(r.t) : 'an unknown date') + '">Delete</button></td></tr>').join('') +
-        '</tbody></table></div><p class="note">' + plural(f.got, 'item') + ' in ' + durTxt(f.minutes) + '. When your gathering level or skills go up, delete older sessions so the averages match how you gather now.</p>'
+        '</tbody></table></div><p class="note">' + plural(f.got, 'item') + ' in ' + durTxt(f.minutes) + '. When your gathering level or skills go up, delete older sessions so the averages match how you gather now.</p>' +
+        (f.track && f.track.x ? '<p class="note"><strong>Tracked sessions:</strong> ' + pct(f.track.ok / f.track.x, 0) + ' of ' + plural(f.track.x, 'extraction') + ' succeeded, ' +
+          (f.track.ok ? pct(f.track.d / f.track.ok, 0) + ' of successes doubled, ' : '') + pct(f.track.u / f.track.x, 0) + ' tiered up, ' + NF1.format(f.track.sec / f.track.x) + ' s per extraction.</p>' : '')
       : '<p class="help">None yet. A session of 15 minutes or more gives a steadier average.</p>') + '</div>';
     let hour = '<div class="dcard"><h4>An hour of ' + name + '</h4>';
     if (!f.minutes) hour += '<p class="help">Log a session to see what an hour is worth.</p>';
@@ -1954,6 +1969,235 @@
     hour += '</div>';
     return hour + '<div class="ngrid">' + log + sessions + '</div>';
   }
+
+  /* ---------- live gathering tracker ---------- */
+  // Watches a screen share for the gathering popup. gather-worker.js does the reading, and keeps getting
+  // frames while the game covers this page; the page shows the totals and saves them as a session.
+  // States: off, asking (share prompt), calibrate (find the popup), tracking, finishing, review.
+  const LS_BOX = 'kina-ledger:livebox:v1';
+  const LIVE_EMPTY = { stream: null, worker: null, ex: [], started: 0, ended: 0, pausedAt: 0, pausedMs: 0, reading: null, snap: null, rough: null, count: 0, timer: null, countTimer: null, finTimer: null, save: false };
+  const LIVE = Object.assign({}, LIVE_EMPTY);
+  function liveSupported() { return !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia && window.MediaStreamTrackProcessor && window.Worker && window.OffscreenCanvas); }
+  // Where the popup sits on your screen, as fractions of the shared screen. Kept in this browser.
+  function liveBox() {
+    try {
+      const b = JSON.parse(localStorage.getItem(LS_BOX) || 'null');
+      return b && ['x', 'y', 'w', 'h'].every(k => typeof b[k] === 'number' && b[k] >= 0 && b[k] <= 1) ? b : null;
+    } catch (_) { return null; }
+  }
+  function saveLiveBox(b) { try { localStorage.setItem(LS_BOX, JSON.stringify({ x: b.x, y: b.y, w: b.w, h: b.h })); } catch (_) {} }
+  async function liveStart(f) {
+    if (!liveSupported()) { toast('Live tracking needs Edge or Chrome on a computer.'); return; }
+    if (UI.live.state !== 'off') return;
+    UI.live = { state: 'asking', f: f, found: null, locating: false };
+    render();
+    let stream;
+    try { stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 10, max: 15 } }, audio: false }); }
+    catch (_) { liveReset(); toast('Screen sharing was cancelled, so tracking didn’t start.'); render(); return; }
+    if (UI.live.state !== 'asking') { for (const t of stream.getTracks()) t.stop(); return; }
+    const track = stream.getVideoTracks()[0], worker = new Worker('gather-worker.js');
+    const processor = new MediaStreamTrackProcessor({ track: track });
+    Object.assign(LIVE, LIVE_EMPTY, { stream: stream, worker: worker, ex: [] });
+    worker.onmessage = e => liveMsg(e.data);
+    // "Stop sharing" in the browser's own bar ends the session too.
+    track.addEventListener('ended', () => { if (UI.live.state === 'tracking' || UI.live.state === 'calibrate') liveStop(false); });
+    const box = liveBox();
+    worker.postMessage({ type: 'start', readable: processor.readable, box: box }, [processor.readable]);
+    if (box) liveTracking(); else { UI.live.state = 'calibrate'; render(); }
+  }
+  function liveTracking() {
+    if (!LIVE.started) LIVE.started = Date.now();
+    if (LIVE.pausedAt) { LIVE.pausedMs += Date.now() - LIVE.pausedAt; LIVE.pausedAt = 0; }
+    UI.live.state = 'tracking';
+    clearInterval(LIVE.timer);
+    LIVE.timer = setInterval(liveTick, 1000);
+    render();
+  }
+  // Seconds tracked so far, leaving out pauses.
+  function liveSecs() {
+    if (!LIVE.started) return 0;
+    const end = LIVE.ended || Date.now();
+    return Math.max(0, (end - LIVE.started - LIVE.pausedMs - (LIVE.pausedAt ? end - LIVE.pausedAt : 0)) / 1000);
+  }
+  function clockTxt(sec) {
+    const s = Math.floor(sec), h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, pad = n => String(n).padStart(2, '0');
+    return (h ? h + ':' + pad(m) : m) + ':' + pad(s % 60);
+  }
+  function readingTxt(r) {
+    if (!r) return 'Waiting for the first frame…';
+    if (!r.present) return 'No gathering popup on screen right now.';
+    return 'Gathering: Success ' + pct(r.s, 0) + ' · Fail ' + pct(r.f, 0) + ' · ' + (r.grade || 'grade not recognized') + (r.orb ? ' · ×2' : '');
+  }
+  function liveTick() {
+    const t = document.getElementById('live-elapsed'), s = document.getElementById('live-status');
+    if (t) t.textContent = clockTxt(liveSecs());
+    if (s) s.textContent = readingTxt(LIVE.reading);
+  }
+  function liveMsg(m) {
+    if (m.type === 'snapshot') {
+      if (LIVE.snap) LIVE.snap.bmp.close();
+      LIVE.snap = { bmp: m.bitmap, w: m.w, h: m.h }; LIVE.rough = null; UI.live.found = null;
+      render();
+    } else if (m.type === 'located') {
+      UI.live.locating = false;
+      UI.live.found = m.box ? { box: m.box, match: m.match, r: m.reading } : null;
+      render();
+    } else if (m.type === 'reading') {
+      LIVE.reading = m.r;
+      liveTick();
+    } else if (m.type === 'extraction') {
+      LIVE.ex.push(m.ex);
+      if (UI.live.state === 'tracking') scheduleRender();
+    } else if (m.type === 'ended') liveFinished();
+  }
+  // Stops sharing. The worker then closes the extraction in progress and says it has ended.
+  function liveStop(save) {
+    if (!LIVE.stream) { liveReset(); render(); return; }
+    LIVE.ended = Date.now(); LIVE.save = save;
+    UI.live.state = 'finishing';
+    clearInterval(LIVE.timer);
+    for (const t of LIVE.stream.getTracks()) t.stop();
+    LIVE.finTimer = setTimeout(liveFinished, 2000);
+    render();
+  }
+  function liveFinished() {
+    if (UI.live.state !== 'finishing') return;
+    clearTimeout(LIVE.finTimer);
+    if (LIVE.worker) { LIVE.worker.terminate(); LIVE.worker = null; }
+    if (LIVE.save) { liveSave(); liveReset(); }
+    else if (LIVE.ex.length) UI.live.state = 'review';
+    else { liveReset(); toast('Tracking stopped. No gathering was seen.'); }
+    render();
+  }
+  // Saves what was tracked as a session on the node: items by grade, time, and the counts behind the rates.
+  function liveSave() {
+    const f = UI.live.f, secs = liveSecs(), sum = GatherReader.summarize({ extractions: LIVE.ex, nodes: [] }, secs);
+    if (!sum.x) { toast('Nothing was gathered, so there’s no session to save.'); return; }
+    const node = gatherCalc(buildCalc()).find(x => x.key === f), n = {};
+    let lost = 0;
+    for (const g of Object.keys(sum.byGrade)) {
+      const it = node && node.grades.find(x => nodeGrade(x.it.name) === g);
+      if (it) n[it.id] = (n[it.id] || 0) + sum.byGrade[g]; else lost += sum.byGrade[g];
+    }
+    const min = Math.min(1440, Math.max(0.1, Math.round(secs / 6) / 10));
+    setRuns(myRuns().concat({ f: f, m: min, n: n, t: Date.now(), st: { x: sum.x, ok: sum.ok, d: sum.d, u: sum.u, sec: Math.round(sum.sec) } }));
+    toast('Saved ' + durTxt(min) + ' of ' + itemName(f) + ': ' + plural(sum.items, 'item') + (lost ? '. ' + plural(lost, 'item') + ' of a grade this page didn’t recognize weren’t counted.' : '.'));
+  }
+  function liveReset() {
+    clearInterval(LIVE.timer); clearInterval(LIVE.countTimer); clearTimeout(LIVE.finTimer);
+    if (LIVE.stream) for (const t of LIVE.stream.getTracks()) t.stop();
+    if (LIVE.worker) LIVE.worker.terminate();
+    if (LIVE.snap) LIVE.snap.bmp.close();
+    Object.assign(LIVE, LIVE_EMPTY, { ex: [] });
+    UI.live = { state: 'off' };
+  }
+  // A snapshot five seconds from now, so there's time to switch back to the game.
+  function liveSnapSoon() {
+    if (!LIVE.worker || LIVE.count) return;
+    LIVE.count = 5;
+    LIVE.countTimer = setInterval(() => {
+      LIVE.count--;
+      if (LIVE.count <= 0) { clearInterval(LIVE.countTimer); LIVE.count = 0; if (LIVE.worker) LIVE.worker.postMessage({ type: 'snapshot' }); }
+      scheduleRender();
+    }, 1000);
+    render();
+  }
+  function liveNotice() {
+    if (UI.live.state === 'off' || UI.tab === 'gather') return '';
+    return '<div class="notice"><span>' + (UI.live.state === 'review' ? 'Your tracked gathering of ' + esc(itemName(UI.live.f)) + ' isn’t saved yet.' : 'Tracking ' + esc(itemName(UI.live.f)) + ' live.') + '</span><button class="btn small" data-act="tab" data-tab="gather">Open Gathering</button></div>';
+  }
+  function liveHTML() {
+    const st = UI.live.state, name = esc(itemName(UI.live.f));
+    if (st === 'off') return '';
+    if (st === 'asking') {
+      return '<section class="panel live"><h2 class="sec-h">Track ' + name + ' live</h2><p class="help">In your browser’s sharing window, choose <strong>Entire screen</strong> and pick the screen the game is on. Sharing just the game window can show a frozen or black picture.</p>' +
+        '<div class="row-gap"><button class="btn ghost" data-act="live-discard">Cancel</button></div></section>';
+    }
+    if (st === 'calibrate') {
+      const fd = UI.live.found, ok = !!(fd && fd.match >= 0.5 && fd.r && fd.r.present);
+      return '<section class="panel live"><h2 class="sec-h">Show the page where the gathering popup is</h2>' +
+        '<ol class="steps"><li>In the game, start gathering a node so the gathering popup is showing.</li><li>Click <strong>Snapshot in 5 seconds</strong> and switch back to the game.</li>' +
+        '<li>Back here, drag a box around the popup, from “Professional Lv.” down to the Fail bar. It doesn’t need to be exact. This is remembered in this browser.</li></ol>' +
+        '<div class="row-gap"><button class="btn primary" data-act="live-snap"' + (LIVE.count ? ' disabled' : '') + '>' + (LIVE.count ? 'Snapshot in ' + LIVE.count + '…' : LIVE.snap ? 'New snapshot in 5 seconds' : 'Snapshot in 5 seconds') + '</button>' +
+        '<button class="btn ghost" data-act="live-discard">Cancel</button></div>' +
+        (LIVE.snap ? '<canvas id="live-snap" class="live-snap" aria-label="Snapshot of your screen. Drag a box around the gathering popup."></canvas>' : '') +
+        (UI.live.locating ? '<p class="help">Looking for the popup…</p>' : '') +
+        (fd ? (ok ? '<div class="live-found"><canvas id="live-zoom" class="live-zoom" width="380" height="110" aria-hidden="true"></canvas><div class="live-found-txt"><p><strong>Found it.</strong> ' + esc(readingTxt(fd.r)) + '</p>' +
+            '<div class="row-gap"><button class="btn primary" data-act="live-use">Use this and start tracking</button></div></div></div>'
+          : '<p class="note loss">Couldn’t find the popup in that box. Check that it shows in the snapshot, then drag again or take a new snapshot.</p>') : '') +
+        '<p class="note">Your screen is read in this browser only. Nothing is recorded or sent anywhere.</p></section>';
+    }
+    const sum = GatherReader.summarize({ extractions: LIVE.ex, nodes: [] }, liveSecs()), paused = !!LIVE.pausedAt;
+    const stat = (l, v) => '<div class="stat"><dt>' + l + '</dt><dd>' + v + '</dd></div>';
+    const items = Object.keys(sum.byGrade).map(g => NF0.format(sum.byGrade[g]) + ' ' + esc(g)).join(' · ') || '0';
+    const recent = LIVE.ex.slice(-5).reverse().map(e => '<li>' + (e.result === 'success' ? esc(e.grade || 'Unrecognized grade') + ' ×' + e.qty + (e.tierUp ? ', tiered up' : '') : e.result === 'fail' ? '<span class="loss">Failed</span>' : 'Stopped early') +
+      ' · ' + NF1.format(e.end - e.start) + ' s</li>').join('');
+    let h = '<section class="panel live"><div class="toolbar"><h2 class="sec-h">' + (st === 'review' ? 'Sharing stopped. Save this session?' : st === 'finishing' ? 'Finishing…' : (paused ? 'Paused: ' : 'Tracking ') + name) + '</h2>' +
+      '<span class="live-time" id="live-elapsed">' + clockTxt(liveSecs()) + '</span></div>' +
+      (st === 'tracking' ? '<p class="live-status" id="live-status">' + esc(readingTxt(LIVE.reading)) + '</p>' : '') +
+      '<dl class="statrow">' + stat('Extractions', NF0.format(sum.x)) + stat('Succeeded', sum.x ? pct(sum.ok / sum.x, 0) : '—') + stat('Doubled', sum.ok ? pct(sum.d / sum.ok, 0) : '—') +
+      stat('Tiered up', sum.x ? pct(sum.u / sum.x, 0) : '—') + stat('Per extraction', sum.x ? NF1.format(sum.sec / sum.x) + ' s' : '—') + stat('Items', items) + '</dl>' +
+      (recent ? '<div><span class="lbl">Latest</span><ul class="live-recent">' + recent + '</ul></div>' : '');
+    if (st === 'tracking') {
+      h += '<div class="row-gap"><button class="btn primary" data-act="live-stop">Stop and save</button><button class="btn" data-act="live-pause">' + (paused ? 'Resume' : 'Pause') + '</button>' +
+        '<button class="btn ghost" data-act="live-recal">Find the popup again</button><button class="btn ghost danger' + (UI.confirm === 'live-discard' ? ' armed' : '') + '" data-act="live-discard">' + (UI.confirm === 'live-discard' ? 'Click again to discard' : 'Discard') + '</button></div>' +
+        '<p class="note">Switch to the game whenever you like: tracking keeps going in the background, and closing this tab stops it. It counts whatever you gather, so stop before you move to another kind of node.</p>';
+    } else if (st === 'review') {
+      h += '<div class="row-gap"><button class="btn primary" data-act="live-save">Save session</button><button class="btn ghost danger' + (UI.confirm === 'live-discard' ? ' armed' : '') + '" data-act="live-discard">' + (UI.confirm === 'live-discard' ? 'Click again to discard' : 'Discard') + '</button></div>';
+    }
+    return h + '</section>';
+  }
+  // The snapshot with the box you're drawing (gold) and the popup it found (green), plus a close-up.
+  function drawLive() {
+    const s = LIVE.snap, cv = document.getElementById('live-snap');
+    if (!s || !cv) return;
+    const w = Math.min(s.w, 1800);
+    if (cv.width !== w) { cv.width = w; cv.height = Math.round(s.h * w / s.w); }
+    const c = cv.getContext('2d'), k = cv.width / s.w, css = getComputedStyle(document.documentElement);
+    const lw = cv.clientWidth ? 2 * cv.width / cv.clientWidth : 2;
+    c.drawImage(s.bmp, 0, 0, cv.width, cv.height);
+    if (LIVE.rough) {
+      c.setLineDash([3 * lw, 2 * lw]); c.lineWidth = lw; c.strokeStyle = css.getPropertyValue('--gold').trim() || '#c89b3c';
+      c.strokeRect(LIVE.rough.x * k, LIVE.rough.y * k, LIVE.rough.w * k, LIVE.rough.h * k);
+    }
+    const fd = UI.live.found;
+    if (fd && fd.box) {
+      c.setLineDash([]); c.lineWidth = lw; c.strokeStyle = css.getPropertyValue('--gain').trim() || '#2e9e4f';
+      c.strokeRect(fd.box.x * cv.width, fd.box.y * cv.height, fd.box.w * cv.width, fd.box.h * cv.height);
+      const z = document.getElementById('live-zoom');
+      if (z) z.getContext('2d').drawImage(s.bmp, fd.box.x * s.w, fd.box.y * s.h, fd.box.w * s.w, fd.box.h * s.h, 0, 0, z.width, z.height);
+    }
+  }
+  // Drawing the rough box on the snapshot.
+  let liveDrag = null;
+  function snapPoint(cv, e) {
+    const r = cv.getBoundingClientRect();
+    return { x: (e.clientX - r.left) / r.width * LIVE.snap.w, y: (e.clientY - r.top) / r.height * LIVE.snap.h };
+  }
+  document.addEventListener('pointerdown', e => {
+    if (!e.target || e.target.id !== 'live-snap' || !LIVE.snap) return;
+    e.preventDefault();
+    e.target.setPointerCapture(e.pointerId);
+    liveDrag = snapPoint(e.target, e);
+    LIVE.rough = { x: liveDrag.x, y: liveDrag.y, w: 0, h: 0 }; UI.live.found = null;
+    drawLive();
+  });
+  document.addEventListener('pointermove', e => {
+    if (!liveDrag || !e.target || e.target.id !== 'live-snap') return;
+    const p = snapPoint(e.target, e);
+    LIVE.rough = { x: Math.min(liveDrag.x, p.x), y: Math.min(liveDrag.y, p.y), w: Math.abs(p.x - liveDrag.x), h: Math.abs(p.y - liveDrag.y) };
+    drawLive();
+  });
+  document.addEventListener('pointerup', () => {
+    if (!liveDrag) return;
+    liveDrag = null;
+    const r = LIVE.rough;
+    if (!r || r.w < 30 || r.h < 10 || !LIVE.worker) { LIVE.rough = null; drawLive(); return; }
+    UI.live.locating = true; UI.live.found = null;
+    LIVE.worker.postMessage({ type: 'locate', rough: r });
+    render();
+  });
+  window.addEventListener('beforeunload', e => { if (LIVE.ex.length && UI.live.state !== 'off') { e.preventDefault(); e.returnValue = ''; } });
 
   function settingsView() {
     const s = S.settings, lock = canManage() ? '' : ' disabled';
@@ -2009,7 +2253,8 @@
       '<h3>Gathering</h3><ul><li>A node’s grades are counted together, since one node can give any of them. <strong>Per hour</strong> = what your logged sessions got ÷ the time they took.</li>' +
       '<li><strong>Sell it all</strong> = each grade per hour × its market price after fees.</li>' +
       '<li><strong>Craft the best</strong> takes the crafts that pay most over selling their materials, and adds them while each earns more per hour of crafting than the hour so far. Your minutes per craft are added to the hour. A craft’s other materials are bought, or counted at their sell price if you gather them too.</li>' +
-      '<li><strong>Buy and craft</strong> = the best expected profit with every material bought, × 60 ÷ your minutes per craft.</li></ul>' +
+      '<li><strong>Buy and craft</strong> = the best expected profit with every material bought, × 60 ÷ your minutes per craft.</li>' +
+      '<li><strong>Track live</strong> reads the gathering popup from a screen share, in this browser only: when each extraction ends, whether the Success or Fail bar filled, the grade from the title color, and the ×2 orb of a double harvest. Tracked sessions also give the node its success, double and tier-up rates.</li></ul>' +
       '<h3>Not counted</h3><ul><li>Listing fees paid in bound Kina. Your time, except on the Gathering tab. Price drops when you list many items at once, which matters most when you sell a lot of gathered materials.</li></ul></div></section>';
     return h;
   }
@@ -2025,11 +2270,11 @@
     }
     renderChrome();
     let html;
-    try { html = S.ready ? accountNotice() + (VIEWS[UI.tab] || VIEWS.rank)() : loadingView(); }
+    try { html = S.ready ? accountNotice() + liveNotice() + (VIEWS[UI.tab] || VIEWS.rank)() : loadingView(); }
     catch (err) { console.error(err); html = '<section class="panel"><h2 class="sec-h">This tab hit an error</h2><p class="help">' + esc(err && err.message) + '</p></section>'; }
     view.innerHTML = html;
     renderDatalist();
-    try { drawCharts(); } catch (err) { console.error(err); }
+    try { drawCharts(); drawLive(); } catch (err) { console.error(err); }
     if (fid) {
       const el = document.getElementById(fid);
       if (el) { el.focus({ preventScroll: true }); if (sel) { try { el.setSelectionRange(sel[0], sel[1]); } catch (_) {} } }
@@ -2183,7 +2428,7 @@
     for (const r of readRuns(d.myRuns)) {
       const f = mapId(r.f), n = {};
       for (const id of Object.keys(r.n)) { const to = mapId(id); if (to) n[to] = r.n[id]; }
-      if (f && !have.some(x => x.f === f && x.t === r.t)) runs.push({ f: f, m: r.m, n: n, t: r.t });
+      if (f && !have.some(x => x.f === f && x.t === r.t)) runs.push(Object.assign({ f: f, m: r.m, n: n, t: r.t }, r.st ? { st: r.st } : {}));
     }
     if (runs.length) setRuns(have.concat(runs));
     if (num(d.myCraftMin) > 0) setCraftMin(num(d.myCraftMin));
@@ -2212,6 +2457,32 @@
       toast('Logged ' + durTxt(m) + ' of ' + itemName(f) + '.');
       render();
     },
+    'live-start': t => liveStart(t.dataset.f),
+    'live-snap': () => liveSnapSoon(),
+    'live-use': () => {
+      const fd = UI.live.found;
+      if (!fd || !fd.box || !LIVE.worker) return;
+      saveLiveBox(fd.box);
+      LIVE.worker.postMessage({ type: 'box', box: fd.box });
+      liveTracking();
+    },
+    'live-recal': () => {
+      if (!LIVE.worker) return;
+      LIVE.worker.postMessage({ type: 'box', box: null });
+      if (!LIVE.pausedAt) LIVE.pausedAt = Date.now();
+      clearInterval(LIVE.timer);
+      UI.live.state = 'calibrate'; UI.live.found = null;
+      render();
+    },
+    'live-pause': () => {
+      if (!LIVE.worker) return;
+      if (LIVE.pausedAt) { LIVE.pausedMs += Date.now() - LIVE.pausedAt; LIVE.pausedAt = 0; } else LIVE.pausedAt = Date.now();
+      LIVE.worker.postMessage({ type: 'pause', on: !!LIVE.pausedAt });
+      render();
+    },
+    'live-stop': () => liveStop(true),
+    'live-save': () => { liveSave(); liveReset(); render(); },
+    'live-discard': () => { if (LIVE.ex.length && !arm('live-discard')) return; liveReset(); render(); },
     'run-del': t => { const ts = +t.dataset.t; setRuns(myRuns().filter(r => !(r.f === t.dataset.f && r.t === ts))); toast('Deleted that session.'); render(); },
     prof: t => { UI.prof = t.dataset.p; UI.rankShow = PAGE; saveUI(); render(); },
     toggle: t => { const id = t.dataset.id; UI.open = UI.open === id ? null : id; render(); },
