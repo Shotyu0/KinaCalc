@@ -68,7 +68,7 @@
   const ID_RE = /^[A-Za-z0-9_\-.~:@+]{1,160}$/;
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
-  const BUILD = '2026-10-22h'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-10-23a'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -144,7 +144,7 @@
     }
     return s;
   }
-  const UI_KEYS = { tab: 's', goal: 's', metric: 's', per: 's', prof: 's', crafts: 's', wanted: 's', planGather: 'b', priceSort: 's', priceFilter: 's', rankAll: 'b', canCraft: 'b', recProf: 's', recSrc: 's', budget: 's', affordOnly: 'b', gatherShow: 's' };
+  const UI_KEYS = { tab: 's', goal: 's', metric: 's', per: 's', prof: 's', crafts: 's', wanted: 's', planGather: 'b', priceSort: 's', priceFilter: 's', rankAll: 'b', canCraft: 'b', recProf: 's', recSrc: 's', budget: 's', affordOnly: 'b', gatherShow: 's', gatherOdds: 's', gatherNoBreaks: 'b' };
   function readUI() {
     try {
       const x = JSON.parse(localStorage.getItem(LS_UI) || '{}') || {};
@@ -229,8 +229,10 @@
     return out.slice(-RUNS_MAX);
   }
   const OPEN_GRADES = ['Common', 'Fine', 'Pure', 'Radiant'];
-  // A tracked session's counts: extractions, successes, doubles, tier-ups, seconds spent extracting, and
-  // g: [extractions, successes] by the grade each extraction opened at.
+  // A tracked session's counts: extractions, successes, doubles, tier-ups, seconds spent extracting;
+  // g: [extractions, successes] by the grade each extraction opened at; t: successes by opening grade
+  // (row) and final grade (column), 4x4 in OPEN_GRADES order; and act, mov, brk: seconds gathering,
+  // moving between nodes, and on breaks.
   function readRunStats(o) {
     if (!o || typeof o !== 'object') return null;
     const s = {};
@@ -242,8 +244,40 @@
         if (Array.isArray(v) && v.length === 2 && num(v[0]) >= 0 && num(v[1]) >= 0 && num(v[1]) <= num(v[0])) s.g[grade] = [num(v[0]), num(v[1])];
       }
     }
+    if (Array.isArray(o.t) && o.t.length === 16 && o.t.every(v => num(v) >= 0)) s.t = o.t.map(num);
+    for (const k of ['act', 'mov', 'brk']) { const v = num(o[k]); if (v >= 0 && v < 1e6) s[k] = v; }
     return s;
   }
+  // The kind of node, for pooling odds: the skills that double or raise a harvest are per kind.
+  function nodeKind(name) { return /Ore$/.test(name) ? 'Ore' : /Gemstone$/.test(name) ? 'Gemstone' : /Odyle$/.test(name) ? 'Odyle' : /Log$/.test(name) ? 'Log' : 'Other'; }
+  // Your odds for each kind of node, pooled from every tracked session of that kind: how often an
+  // extraction opens at each grade, succeeds from it and ends at each grade, and doubles. items[h] is the
+  // expected count of grade h per extraction, which steadies an hour's value against lucky or unlucky
+  // rare grades.
+  function gatherOdds() {
+    const by = {};
+    for (const r of myRuns()) {
+      if (!r.st || !r.st.t || !r.st.g) continue;
+      const k = nodeKind(itemName(r.f)), o = by[k] || (by[k] = { x: 0, ok: 0, d: 0, open: [0, 0, 0, 0], okBy: [0, 0, 0, 0], t: Array(16).fill(0), nodes: new Set() });
+      o.x += r.st.x; o.ok += r.st.ok; o.d += r.st.d; o.nodes.add(r.f);
+      OPEN_GRADES.forEach((g, i) => { const v = r.st.g[g]; if (v) { o.open[i] += v[0]; o.okBy[i] += v[1]; } });
+      r.st.t.forEach((v, i) => { o.t[i] += v; });
+    }
+    for (const k of Object.keys(by)) {
+      const o = by[k], opened = o.open.reduce((s, v) => s + v, 0), dbl = o.ok ? o.d / o.ok : 0;
+      o.items = [0, 0, 0, 0];
+      for (let g = 0; g < 4; g++) {
+        if (!o.open[g] || !opened) continue;
+        const pOpen = o.open[g] / opened, pOk = o.okBy[g] / o.open[g], row = o.t.slice(g * 4, g * 4 + 4), rowN = row.reduce((s, v) => s + v, 0);
+        for (let h = 0; h < 4; h++) o.items[h] += pOpen * pOk * (rowN ? row[h] / rowN : (h === g ? 1 : 0)) * (1 + dbl);
+      }
+    }
+    return by;
+  }
+  // Odds are only used once this many extractions of a kind have been tracked.
+  const ODDS_MIN = 30;
+  // A gap with no extraction longer than this is a break, not moving between nodes.
+  const BREAK_S = 120;
   // "Common 11 of 12 (92%) · Fine 3 of 3 (100%)" from { grade: [extractions, successes] }.
   function openRatesTxt(g) {
     return OPEN_GRADES.filter(k => g && g[k] && g[k][0]).map(k => k + ' ' + g[k][1] + ' of ' + g[k][0] + ' (' + pct(g[k][1] / g[k][0], 0) + ')').join(' · ');
@@ -272,7 +306,7 @@
     priceQuery: '', priceSort: 'name', priceFilter: 'all', priceShow: 100, priceOpen: null,
     rankQ: '', rankAll: false, canCraft: false, rankShow: PAGE,
     recQ: '', recProf: 'all', recSrc: 'all', recShow: PAGE, budget: '', affordOnly: false,
-    gatherShow: '', gatherQ: '', gOpen: null, runDraft: null
+    gatherShow: '', gatherQ: '', gOpen: null, runDraft: null, gatherOdds: 'exp', gatherNoBreaks: false
   }, readUI());
   UI.editor = null; UI.editorErr = []; UI.editorFrom = 'recipes';
   UI.shots = { status: 'idle', market: null, source: null, pasteText: '', pasteNote: '' };
@@ -1820,16 +1854,18 @@
       if (!nodes.has(key)) nodes.set(key, { key: key, name: itemName(key), grades: [] });
       nodes.get(key).grades.push(g);
     }
-    const runs = myRuns(), out = [];
+    const runs = myRuns(), out = [], odds = gatherOdds(), expected = UI.gatherOdds !== 'raw';
+    // A session's minutes, less its breaks when you've chosen to leave them out.
+    const mins = r => UI.gatherNoBreaks && r.st && r.st.brk ? Math.max(0.1, r.m - r.st.brk / 60) : r.m;
     for (const f of nodes.values()) {
       f.grades.sort((a, b) => NODE_GRADES.indexOf(nodeGrade(a.it.name)) - NODE_GRADES.indexOf(nodeGrade(b.it.name)));
       f.ids = f.grades.map(g => g.id);
       f.runs = runs.filter(r => r.f === f.key).sort((a, b) => b.t - a.t);
-      f.minutes = f.runs.reduce((s, r) => s + r.m, 0);
+      f.minutes = f.runs.reduce((s, r) => s + mins(r), 0);
       f.got = 0;
       for (const g of f.grades) {
         g.got = f.runs.reduce((s, r) => s + (r.n[g.id] || 0), 0);
-        g.perHour = f.minutes ? g.got * 60 / f.minutes : NaN;
+        g.perHour = g.perHourGot = f.minutes ? g.got * 60 / f.minutes : NaN;
         f.got += g.got;
       }
       f.unpriced = f.grades.filter(g => g.got > 0 && g.net == null);
@@ -1837,8 +1873,24 @@
       f.track = tracked.length ? tracked.reduce((a, r) => {
         const g = Object.assign({}, a.g);
         for (const k of Object.keys(r.st.g || {})) g[k] = [(g[k] ? g[k][0] : 0) + r.st.g[k][0], (g[k] ? g[k][1] : 0) + r.st.g[k][1]];
-        return { x: a.x + r.st.x, ok: a.ok + r.st.ok, d: a.d + r.st.d, u: a.u + r.st.u, sec: a.sec + r.st.sec, g: g };
-      }, { x: 0, ok: 0, d: 0, u: 0, sec: 0, g: {} }) : null;
+        return { x: a.x + r.st.x, ok: a.ok + r.st.ok, d: a.d + r.st.d, u: a.u + r.st.u, sec: a.sec + r.st.sec, g: g,
+          act: a.act + (r.st.act || 0), mov: a.mov + (r.st.mov || 0), brk: a.brk + (r.st.brk || 0), timed: a.timed + (r.st.act != null ? r.m * 60 : 0), min: a.min + mins(r) };
+      }, { x: 0, ok: 0, d: 0, u: 0, sec: 0, g: {}, act: 0, mov: 0, brk: 0, timed: 0, min: 0 }) : null;
+      // Expected: this node's extractions per hour (tracked) at your pooled odds for its kind, so a lucky
+      // or unlucky rare grade doesn't swing the hour. As gathered: what your sessions actually got.
+      f.kind = nodeKind(f.name);
+      f.odds = odds[f.kind] && odds[f.kind].x >= ODDS_MIN ? odds[f.kind] : null;
+      if (f.odds && f.track && f.track.x) {
+        f.xHour = f.track.x * 60 / f.track.min;
+        f.expect = {};
+        for (const g of f.grades) {
+          const h = OPEN_GRADES.indexOf(nodeGrade(g.it.name) === 'Fresh' ? 'Fine' : nodeGrade(g.it.name));
+          g.perHourExp = h >= 0 ? f.xHour * f.odds.items[h] : 0;
+          f.expect[g.id] = h >= 0 ? f.track.x * f.odds.items[h] : 0;
+          if (expected) g.perHour = g.perHourExp;
+        }
+        f.expected = expected;
+      }
       f.sellHour = f.minutes ? f.grades.reduce((s, g) => s + (g.net == null ? 0 : g.perHour * g.net), 0) : NaN;
       f.plan = f.minutes && tC ? craftPlan(f, tC) : null;
       f.craftHour = f.plan ? f.plan.hour : NaN;
@@ -1917,13 +1969,15 @@
       .sort((a, b) => (top(b) - top(a)) || (bestNet(b) - bestNet(a)) || a.name.localeCompare(b.name));
     const B = myBudget(), levelsSet = Object.keys(myLevels()).length > 0;
     let h = liveHTML() + gatherLead(C, nodes, tC);
-    h += '<p class="help">Gathering depends on things this page can’t know: how fast nodes respawn, other players taking them, failed extractions, double harvests and tier-ups. So it uses what you actually get. Open a node, then either track it live from a screen share, or gather for a while and log how long it took and how many of each grade you got. Every session adds to the averages. ' +
+    h += '<p class="help">Gathering depends on things this page can’t know: how fast nodes respawn, other players taking them, failed extractions, double harvests and tier-ups. So it uses what you actually get. Open a node, then either track it live from a screen share, or gather for a while and log how long it took and how many of each grade you got. Every session adds to the averages. <strong>Expected</strong> uses this node’s extractions per hour with your odds from every tracked session of the same kind (ore, gems, Odyle, logs), so one lucky or unlucky Pure or Radiant doesn’t swing the hour; <strong>As gathered</strong> uses exactly what you got. <strong>Leave out breaks</strong> drops tracked gaps of over ' + BREAK_S / 60 + ' minutes without an extraction. ' +
       'Figures are Kina per hour of your time, after ' + feesTxt() + '. <strong>Craft the best</strong> crafts the grades worth more crafted and adds your minutes per craft to the hour. Each craft’s other materials are bought, or counted at their sell price if you gather them too. It assumes the market buys everything at today’s price.' +
       (levelsSet ? ' Only crafts your levels allow are counted' + (B ? ', and only ones your ' + compact(B) + ' budget covers.' : '.') : B ? ' Only crafts your ' + compact(B) + ' budget covers are counted.' : ' Set a budget on Rankings to count only crafts you can afford.') +
       (S.uid ? ' Your sessions and minutes per craft are yours alone.' : '') + '</p>';
     h += '<div class="filters"><div class="field"><label for="gq">Find a material</label><input id="gq" class="in" type="search" value="' + esc(UI.gatherQ) + '" data-inp="gq" placeholder="e.g. Odyle, Ore, Sapphire" autocomplete="off"></div>' +
       '<div class="field narrow"><label for="g-craft">My minutes per craft</label><input id="g-craft" class="in num" inputmode="decimal" value="' + (tC ? esc(NF2.format(tC)) : '') + '" data-chg="g-craft" placeholder="e.g. 2" autocomplete="off"></div>' +
       '<div class="seg" role="group" aria-label="Which nodes"><button data-act="g-show" data-v="mine" aria-pressed="' + (show === 'mine') + '">I gather</button><button data-act="g-show" data-v="all" aria-pressed="' + (show === 'all') + '">All raw materials</button></div>' +
+      '<div class="seg" role="group" aria-label="Grades per hour"><button data-act="g-odds" data-v="exp" aria-pressed="' + (UI.gatherOdds !== 'raw') + '" title="Your odds from every tracked session of the same kind of node">Expected</button><button data-act="g-odds" data-v="raw" aria-pressed="' + (UI.gatherOdds === 'raw') + '" title="What your sessions here actually got">As gathered</button></div>' +
+      '<label class="check"><input type="checkbox" id="g-breaks" data-chg="g-breaks"' + (UI.gatherNoBreaks ? ' checked' : '') + '> Leave out breaks</label>' +
       '<button class="btn primary" data-act="live-start"' + (!liveSupported() || UI.live.state !== 'off' ? ' disabled' : '') + ' title="' + (liveSupported() ? 'Counts every node you gather from a screen share' : 'Needs Edge or Chrome on a computer') + '">Track live</button></div>';
     if (show === 'all') h += '<p class="help">Every material a recipe uses that no recipe makes, with the grades of one material together. Some are drops rather than gathered, so tick the ones you gather.</p>';
     if (!rows.length) {
@@ -1938,20 +1992,34 @@
       if (f.grades.some(g => priceInfo(g.it).doubtful)) tags.push(['warn', 'Ignoring a doubtful price']);
       if (f.unpriced.length) tags.push(['warn', plural(f.unpriced.length, 'grade') + ' without a price']);
       if (f.plan) tags.push(f.plan.steps.length ? ['craft', 'Craft some'] : ['gather', 'Sell it all']);
-      const mix = f.got && f.grades.length > 1 ? f.grades.filter(g => g.got).map(g => nodeGrade(g.it.name) + ' ' + pct(g.got / f.got, 0)).join(' · ') : '';
+      const perH = f.grades.reduce((s, g) => s + (isFinite(g.perHour) ? g.perHour : 0), 0);
+      const mix = perH && f.grades.length > 1 ? f.grades.filter(g => g.perHour > 0).map(g => nodeGrade(g.it.name) + ' ' + pct(g.perHour / perH, g.perHour / perH < 0.01 ? 1 : 0)).join(' · ') : '';
       h += '<tr class="row' + (open ? ' open' : '') + '">' +
         '<td class="c-name"><div class="gname"><input type="checkbox" class="check" data-chg="gather-node" data-ids="' + esc(f.ids.join(' ')) + '"' + (f.grades.some(g => isGathered(g.it)) ? ' checked' : '') +
           ' aria-label="I gather ' + esc(f.name) + '" title="I gather this myself">' +
         '<button class="rname" data-act="g-open" data-id="' + key + '" aria-expanded="' + open + '" aria-controls="gd-' + key + '">' + nameHTML(f.key) + '</button></div>' +
         '<div class="rmeta"><span>' + (f.grades.length > 1 ? esc(f.grades.map(g => nodeGrade(g.it.name)).join(', ')) : 'One grade') + '</span>' + tagList(tags) + '</div></td>' +
         '<td class="num" data-label="Time logged"><div class="v">' + (f.minutes ? durTxt(f.minutes) : '—') + '</div><div class="sub">' + (f.runs.length ? plural(f.runs.length, 'session') : 'open it to log one') + '</div></td>' +
-        '<td class="num" data-label="You get per hour"><div class="v">' + (f.minutes ? qfmt(f.got * 60 / f.minutes) + ' items' : '—') + '</div><div class="sub">' + esc(mix) + '</div></td>' +
+        '<td class="num" data-label="You get per hour"><div class="v">' + (f.minutes ? qfmt(perH) + ' items' : '—') + '</div><div class="sub">' + esc(mix) + (f.expected ? ' · expected' : '') + '</div></td>' +
         '<td class="num" data-label="Sell it all"><div class="v ' + tone(f.sellHour) + '">' + (isFinite(f.sellHour) ? sk(f.sellHour) : '—') + '</div><div class="sub">' + (isFinite(f.sellHour) ? 'Kina per hour' : 'log a session') + '</div></td>' +
         '<td class="num" data-label="Craft the best"><div class="v ' + tone(f.plan && f.plan.steps.length ? f.craftHour : NaN) + '">' + (f.plan && f.plan.steps.length ? sk(f.craftHour) : '—') + '</div><div class="sub">' +
           (f.plan ? (f.plan.steps.length ? 'Kina per hour' : 'selling pays more') : !f.minutes ? 'log a session' : 'enter minutes per craft') + '</div></td></tr>';
       if (open) h += '<tr class="detail" id="gd-' + key + '"><td colspan="5">' + nodeDetail(f, tC) + '</td></tr>';
     }
     return h + '</tbody></table></div>';
+  }
+  // Where the expected rates come from, and how this node's tracked luck compares with them.
+  function oddsNote(f) {
+    if (!f.track || !f.track.x) return '';
+    const kind = f.kind === 'Gemstone' ? 'gem' : f.kind === 'Other' ? 'other' : f.kind.toLowerCase(), all = gatherOdds()[f.kind];
+    if (!f.odds) return '<p class="note">Expected rates start once ' + ODDS_MIN + ' extractions of ' + kind + ' nodes are tracked (' + (all ? all.x : 0) + ' so far). Until then this shows what you got.</p>';
+    const tracked = f.runs.filter(r => r.st), luck = f.grades.map(g => {
+      const got = tracked.reduce((s, r) => s + (r.n[g.id] || 0), 0), exp = f.expect[g.id] || 0;
+      return got || exp >= 0.05 ? nodeGrade(g.it.name) + ' ' + NF0.format(got) + ' (expected ' + NF1.format(exp) + ')' : null;
+    }).filter(Boolean);
+    return '<p class="note">' + (f.expected ? '<strong>Expected</strong> is ' + NF1.format(f.xHour) + ' extractions an hour here at your ' + kind + ' odds, from ' + plural(f.odds.x, 'tracked extraction') + ' on ' + plural(f.odds.nodes.size, 'node') + '. '
+      : 'Showing what you got. <strong>Expected</strong> would use your ' + kind + ' odds from ' + plural(f.odds.x, 'tracked extraction') + '. ') +
+      '<strong>Your luck here</strong> over ' + plural(f.track.x, 'tracked extraction') + ': ' + luck.join(' · ') + '.</p>';
   }
   function nodeDetail(f, tC) {
     const key = esc(f.key), name = esc(f.name), multi = f.grades.length > 1;
@@ -1967,21 +2035,23 @@
     const got = r => f.grades.filter(g => r.n[g.id]).map(g => NF0.format(r.n[g.id]) + ' ' + label(g)).join(', ') || 'nothing';
     const sessions = '<div class="dcard"><h4>Your sessions</h4>' + (f.runs.length
       ? '<div class="mini-well"><table class="mini"><thead><tr><th>When</th><th class="num">Time</th><th>You got</th><th><span class="sr">Delete</span></th></tr></thead><tbody>' +
-        f.runs.map(r => '<tr><td>' + esc(r.t ? when(r.t) : '—') + (r.st ? ' <span class="tag gather">Tracked</span>' : '') + '</td><td class="num">' + durTxt(r.m) + '</td><td>' + esc(got(r)) + '</td>' +
+        f.runs.map(r => '<tr><td>' + esc(r.t ? when(r.t) : '—') + (r.st ? ' <span class="tag gather">Tracked</span>' : '') + '</td><td class="num">' + durTxt(r.m) +
+          (r.st && r.st.act != null && r.m ? '<div class="sub">' + pct(Math.min(1, r.st.act / (r.m * 60)), 0) + ' active</div>' : '') + '</td><td>' + esc(got(r)) + '</td>' +
           '<td><button class="btn small ghost" data-act="run-del" data-f="' + key + '" data-t="' + r.t + '" aria-label="Delete the session from ' + esc(r.t ? when(r.t) : 'an unknown date') + '">Delete</button></td></tr>').join('') +
         '</tbody></table></div><p class="note">' + plural(f.got, 'item') + ' in ' + durTxt(f.minutes) + '. When your gathering level or skills go up, delete older sessions so the averages match how you gather now.</p>' +
         (f.track && f.track.x ? '<p class="note"><strong>Tracked sessions:</strong> ' + pct(f.track.ok / f.track.x, 0) + ' of ' + plural(f.track.x, 'extraction') + ' succeeded' +
           (openRatesTxt(f.track.g) ? ' (by the grade they opened at: ' + openRatesTxt(f.track.g) + ')' : '') + '. ' +
-          (f.track.ok ? 'Of the successes, ' + pct(f.track.d / f.track.ok, 0) + ' doubled and ' + pct(f.track.u / f.track.ok, 0) + ' tiered up. ' : '') + NF1.format(f.track.sec / f.track.x) + ' s per extraction.</p>' : '')
+          (f.track.ok ? 'Of the successes, ' + pct(f.track.d / f.track.ok, 0) + ' doubled and ' + pct(f.track.u / f.track.ok, 0) + ' tiered up. ' : '') + NF1.format(f.track.sec / f.track.x) + ' s per extraction.' +
+          (f.track.timed ? ' <strong>Active ' + pct(f.track.act / f.track.timed, 0) + '</strong> of tracked time: gathering ' + durTxt(f.track.act / 60) + ', moving between nodes ' + durTxt(f.track.mov / 60) + ', breaks ' + durTxt(f.track.brk / 60) + '.' : '') + '</p>' : '')
       : '<p class="help">None yet. A session of 15 minutes or more gives a steadier average.</p>') + '</div>';
     let hour = '<div class="dcard"><h4>An hour of ' + name + '</h4>';
     if (!f.minutes) hour += '<p class="help">Log a session to see what an hour is worth.</p>';
-    hour += '<div class="mini-well"><table class="mini wide"><thead><tr><th>' + (multi ? 'Grade' : 'Material') + '</th><th class="num">Per hour</th><th class="num">Each, after fees</th><th class="num">Kina per hour</th><th>Best craft for it</th></tr></thead><tbody>' +
-      f.grades.map(g => '<tr><td>' + nameHTML(g.id) + '</td><td class="num">' + (f.minutes ? qfmt(g.perHour) : '—') + '</td><td class="num">' + (g.net != null ? k(g.net) : 'no price') + '</td>' +
+    hour += '<div class="mini-well"><table class="mini wide"><thead><tr><th>' + (multi ? 'Grade' : 'Material') + '</th><th class="num">' + (f.expected ? 'Expected per hour' : 'Per hour') + '</th><th class="num">You got</th><th class="num">Each, after fees</th><th class="num">Kina per hour</th><th>Best craft for it</th></tr></thead><tbody>' +
+      f.grades.map(g => '<tr><td>' + nameHTML(g.id) + '</td><td class="num">' + (f.minutes ? qfmt(g.perHour) : '—') + '</td><td class="num">' + NF0.format(g.got) + '</td><td class="num">' + (g.net != null ? k(g.net) : 'no price') + '</td>' +
         '<td class="num">' + (f.minutes && g.net != null ? sk(g.perHour * g.net) : '—') + '</td>' +
         '<td>' + (g.best ? '<button class="linkbtn" data-act="goto-recipe" data-id="' + esc(g.best.row.r.id) + '">' + nameHTML(g.best.row.r.output) + '</button><div class="sub ' + tone(g.best.gain) + '">' + sk(g.best.gain) + ' a craft over selling the ' + qfmt(g.best.qty) + ' it uses</div>' : '<span class="muted">no priced craft</span>') + '</td></tr>').join('') +
-      (f.minutes ? '<tr><td><strong>Sell it all</strong></td><td class="num">' + qfmt(f.got * 60 / f.minutes) + '</td><td></td><td class="num ' + tone(f.sellHour) + '"><strong>' + sk(f.sellHour) + '</strong></td><td></td></tr>' : '') +
-      '</tbody></table></div>';
+      (f.minutes ? '<tr><td><strong>Sell it all</strong></td><td class="num">' + qfmt(f.grades.reduce((s, g) => s + (isFinite(g.perHour) ? g.perHour : 0), 0)) + '</td><td class="num">' + NF0.format(f.got) + '</td><td></td><td class="num ' + tone(f.sellHour) + '"><strong>' + sk(f.sellHour) + '</strong></td><td></td></tr>' : '') +
+      '</tbody></table></div>' + oddsNote(f);
     if (f.plan && f.plan.steps.length) {
       hour += '<p class="note"><strong>Craft the best:</strong> from an hour’s haul, craft ' + f.plan.steps.map(s => qfmt(s.n) + ' × <button class="linkbtn" data-act="goto-recipe" data-id="' + esc(s.c.row.r.id) + '">' + esc(itemName(s.c.row.r.output)) + '</button> from your ' + esc(label(s.g)) + ' (' + sk(s.c.gain) + ' each over selling)').join(', ') +
         ' and sell the rest. At ' + qfmt(tC) + ' min per craft that’s ' + sk(f.plan.kina) + ' Kina in ' + durTxt(f.plan.hours * 60) + ', or ' + sk(f.plan.hour) + ' an hour.</p>';
@@ -2176,27 +2246,50 @@
     else UI.live.state = 'review';
     render();
   }
-  // Saves one session per node: its items by grade, its share of the time, and the counts behind its rates.
-  // Time is shared out by when things happened: each extraction counts its own length plus the gap before
-  // it (getting to the node), with gaps capped at 90 seconds so a break isn't charged to one node.
+  // How tracked time was spent, from the gaps between extractions. An extraction, and a short gap before
+  // it at the same node, count as gathering; a short gap from another node as moving; a gap over BREAK_S,
+  // and the time before the first and after the last extraction, as a break. Each part goes to the group
+  // (keyOf) of the extraction after it. Pauses show up as long gaps, so they're taken back out of breaks.
+  function timeSplit(list, total, keyOf) {
+    const ex = list.slice().sort((a, b) => a.start - b.start), by = new Map();
+    const at = k => { if (!by.has(k)) by.set(k, { act: 0, mov: 0, brk: 0 }); return by.get(k); };
+    let prev = null, sum = 0;
+    for (const e of ex) {
+      const p = at(keyOf(e)), len = Math.max(0, e.end - e.start);
+      p.act += len; sum += len;
+      if (prev) {
+        const gap = Math.max(0, e.start - prev.end);
+        if (gap > BREAK_S) p.brk += gap; else if (e.node === prev.node && keyOf(e) === keyOf(prev)) p.act += gap; else p.mov += gap;
+        sum += gap;
+      }
+      prev = e;
+    }
+    const parts = [...by.values()], brk = parts.reduce((s, p) => s + p.brk, 0), busy = parts.reduce((s, p) => s + p.act + p.mov, 0);
+    if (sum > total && brk > 0) { const cut = Math.min(brk, sum - total); for (const p of parts) p.brk -= cut * p.brk / brk; }
+    const rest = Math.max(0, total - Math.min(sum, total));
+    for (const p of parts) p.brk += busy ? rest * (p.act + p.mov) / busy : rest / parts.length;
+    return by;
+  }
+  // Saves one session per node: its items by grade, its share of the time, and the counts behind its rates
+  // (by the grade each extraction opened and ended at) and its uptime.
   function liveSave() {
     const secs = liveSecs(), nodes = gatherCalc(buildCalc());
     const ex = LIVE.ex.slice().sort((a, b) => a.start - b.start), kindOf = new Map(LIVE.kinds.map(k => [k.id, k]));
-    const byNode = new Map();
-    let prevEnd = null, total = 0, lost = 0;
+    const nodeOf = e => { const k = kindOf.get(e.kind); return k && k.f && k.f !== '-' ? k.f : '?'; };
+    const times = timeSplit(ex, secs, nodeOf), byNode = new Map();
+    let lost = 0;
     for (const e of ex) {
-      const k = kindOf.get(e.kind), w = (prevEnd == null ? 0 : Math.min(90, Math.max(0, e.start - prevEnd))) + Math.max(0, e.end - e.start);
-      prevEnd = e.end; total += w;
-      if (!k || !k.f) continue;
-      if (!byNode.has(k.f)) byNode.set(k.f, { ex: [], w: 0, icons: [] });
-      const b = byNode.get(k.f);
-      b.ex.push(e); b.w += w;
+      const f = nodeOf(e), k = kindOf.get(e.kind);
+      if (f === '?') continue;
+      if (!byNode.has(f)) byNode.set(f, { ex: [], icons: [] });
+      const b = byNode.get(f);
+      b.ex.push(e);
       for (const ic of k.icons && k.icons.length ? k.icons : [k.icon]) if (ic && b.icons.indexOf(ic) < 0) b.icons.push(ic);
     }
     const runs = myRuns().slice(), saved = [], now = Date.now();
     let i = 0;
     for (const [f, b] of byNode) {
-      const sum = GatherReader.summarize({ extractions: b.ex, nodes: [] }, 0);
+      const sum = GatherReader.summarize({ extractions: b.ex, nodes: [] }, 0), tm = times.get(f);
       if (!sum.x) continue;
       // Each success counts toward the item its icon named, or else the node's item of its grade
       // (herbs call their second grade Fresh where the popup says Fine).
@@ -2207,10 +2300,14 @@
         const it = mine || (node && node.grades.find(x => { const ng = nodeGrade(x.it.name); return ng === e.grade || (ng === 'Fresh' && e.grade === 'Fine'); }));
         if (it) n[it.id] = (n[it.id] || 0) + e.qty; else lost += e.qty;
       }
-      const min = Math.min(1440, Math.max(0.1, Math.round(secs * (total > 0 ? b.w / total : 1 / byNode.size) / 6) / 10));
-      const g = {};
+      const min = Math.min(1440, Math.max(0.1, Math.round((tm.act + tm.mov + tm.brk) / 6) / 10));
+      const g = {}, t = Array(16).fill(0);
       for (const k of OPEN_GRADES) if (sum.byOpen[k]) g[k] = [sum.byOpen[k].x, sum.byOpen[k].ok];
-      runs.push({ f: f, m: min, n: n, t: now + i++, st: { x: sum.x, ok: sum.ok, d: sum.d, u: sum.u, sec: Math.round(sum.sec), g: g } });
+      for (const e of b.ex) {
+        const o = OPEN_GRADES.indexOf(e.openGrade), h = OPEN_GRADES.indexOf(e.grade);
+        if (e.result === 'success' && o >= 0 && h >= 0) t[o * 4 + h]++;
+      }
+      runs.push({ f: f, m: min, n: n, t: now + i++, st: { x: sum.x, ok: sum.ok, d: sum.d, u: sum.u, sec: Math.round(sum.sec), g: g, t: t, act: Math.round(tm.act), mov: Math.round(tm.mov), brk: Math.round(tm.brk) } });
       for (const icon of b.icons) rememberIcon(f, icon);
       saved.push(durTxt(min) + ' of ' + itemName(f) + ' (' + plural(sum.items, 'item') + ')');
     }
@@ -2276,11 +2373,15 @@
       ' · ' + NF1.format(e.end - e.start) + ' s</li>').join('');
     const opened = {};
     for (const k of Object.keys(sum.byOpen)) opened[k] = [sum.byOpen[k].x, sum.byOpen[k].ok];
+    const upTotal = liveSecs(), up = LIVE.ex.length && upTotal > 0 ? Object.assign({ total: upTotal }, timeSplit(LIVE.ex, upTotal, () => 1).get(1)) : null;
     const title = st === 'review' ? (naming ? 'Which node was each?' : 'Sharing stopped. Save this session?') : st === 'finishing' ? 'Finishing…' : (paused ? 'Paused: ' : 'Tracking ') + (kinds.length > 1 ? 'a mixed route' : name);
     let h = '<section class="panel live"><div class="toolbar"><h2 class="sec-h">' + title + '</h2>' + clock + '</div>' +
       (st === 'tracking' ? '<p class="live-status" id="live-status">' + esc(readingTxt(LIVE.reading)) + '</p>' : '') +
       '<dl class="statrow">' + stat('Extractions', NF0.format(sum.x)) + stat('Succeeded', sum.x ? pct(sum.ok / sum.x, 0) : '—') + stat('Doubled', sum.ok ? pct(sum.d / sum.ok, 0) : '—') +
-      stat('Tiered up', sum.ok ? pct(sum.u / sum.ok, 0) : '—') + stat('Per extraction', sum.x ? NF1.format(sum.sec / sum.x) + ' s' : '—') + stat('Items', items(sum)) + '</dl>' +
+      stat('Tiered up', sum.ok ? pct(sum.u / sum.ok, 0) : '—') + stat('Per extraction', sum.x ? NF1.format(sum.sec / sum.x) + ' s' : '—') +
+      stat('Active', up ? pct(up.act / up.total, 0) : '—') + stat('Items', items(sum)) + '</dl>' +
+      (up ? '<p class="help"><strong>Time:</strong> gathering ' + clockTxt(up.act) + ', moving between nodes ' + clockTxt(up.mov) + ', breaks ' + clockTxt(up.brk) +
+        ' (gaps over ' + BREAK_S / 60 + ' minutes, and before the first and after the last extraction).</p>' : '') +
       (openRatesTxt(opened) ? '<p class="help"><strong>Succeeded by the grade each opened at:</strong> ' + esc(openRatesTxt(opened)) + '. Doubled and tiered up are shares of successes.</p>' : '');
     if (st === 'review') {
       const opts = gatherCalc(buildCalc()).map(f => [f.key, f.name]).sort((a, b) => a[1].localeCompare(b[1]));
@@ -2663,6 +2764,7 @@
     'rate-col': t => { UI.rateCol = t.dataset.v; UI.rateOpen = true; render(); },
     'goto-recipe': t => { const r = getRecipe(t.dataset.id); if (!r) return; UI.tab = 'rank'; UI.goal = 'normal'; UI.prof = 'all'; UI.rankQ = itemName(r.output); UI.open = r.id; UI.rankShow = PAGE; saveUI(); render(); window.scrollTo({ top: 0 }); },
     'g-show': t => { UI.gatherShow = t.dataset.v; UI.gOpen = null; saveUI(); render(); },
+    'g-odds': t => { UI.gatherOdds = t.dataset.v === 'raw' ? 'raw' : 'exp'; saveUI(); render(); },
     'g-open': t => { UI.gOpen = UI.gOpen === t.dataset.id ? null : t.dataset.id; render(); },
     'run-add': t => {
       const f = t.dataset.f, d = runDraft(f), m = minutesIn(d.m), n = {};
@@ -2852,6 +2954,7 @@
       saveUI(); later();
     },
     'gather-toggle': t => { setGather([t.dataset.id], t.checked); later(); },
+    'g-breaks': t => { UI.gatherNoBreaks = t.checked; saveUI(); later(); },
     'gather-node': t => { setGather(t.dataset.ids.split(' '), t.checked); later(); },
     'live-kind': t => { const k = LIVE.kinds[+t.dataset.k]; if (k) { k.f = t.value || null; k.sure = !!t.value; k.picked = true; } later(); },
     'live-prob': t => { const p = LIVE.problems[+t.dataset.i]; if (p) p.send = t.checked; },
