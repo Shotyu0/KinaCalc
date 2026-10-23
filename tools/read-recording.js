@@ -35,6 +35,7 @@ p.stdout.on('data', d => {
 p.stderr.on('data', d => process.stderr.write(d));
 p.on('close', () => {
   const res = tr.finish(i / fps), sum = R.summarize(res, i / fps);
-  res.extractions.forEach((e, k) => console.log(`#${k + 1} node ${e.node} ${e.start.toFixed(1)}–${e.end.toFixed(1)}s ${e.result} ${e.grade || '?'}${e.tierUp ? ' (tier-up from ' + e.firstGrade + ')' : ''}${e.qty ? ' x' + e.qty : ''}`));
+  res.extractions.forEach((e, k) => console.log(`#${k + 1} node ${e.node} ${e.start.toFixed(1)}–${e.end.toFixed(1)}s ${e.result} opened ${e.openGrade || '?'}` +
+    `${e.tierUp ? ', Appraiser to ' + e.grade : ''}${e.qty ? ' x' + e.qty : ''}${e.orb && e.qty < 2 ? ' (icon without x2)' : ''}`));
   console.log(JSON.stringify(sum));
 });

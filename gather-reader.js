@@ -8,7 +8,8 @@
   const L = {
     sRow: 76, fRow: 93, barX0: 62, barX1: 362, scanX0: 116,
     sLabel: [64, 72, 110, 80], fLabel: [64, 89, 86, 97],
-    title: [18, 45, 230, 59], icon: [344, 40, 376, 66],
+    // x2 stops short of the Fine panel's bright right edge, and below the (i) icon's stem.
+    title: [18, 45, 230, 59], icon: [344, 40, 376, 66], x2: [360, 57, 373, 67],
     item: [25, 72, 50, 96]         // the item's own icon, left of the bars
   };
   // Two item icons closer than this (average difference per color channel, 0-255) are the same item.
@@ -95,13 +96,24 @@
     return {
       present: true, s: s.frac, f: fl.frac, grade: g.name, gradeRgb: g.rgb, icon: itemIcon(px),
       orb: count(px, L.icon, c => c[1] > 120 && c[1] > c[0] + 35 && c[1] > c[2] + 25) >= 25,
+      // The white "x2" on the Plentiful Harvest orb. The Ore Appraiser icon shows in the same spot without it.
+      x2: count(px, L.x2, c => Math.min(c[0], c[1], c[2]) > 150) >= 8,
       sDone: count(px, [L.scanX0, L.sRow - 2, L.barX1 - 4, L.sRow + 2], sDone) > span,
       fDone: count(px, [L.scanX0, L.fRow - 2, L.barX1 - 4, L.fRow + 2], fDone) > span
     };
   }
 
+  // Grades low to high, as the popup title shows them.
+  const RANK = { Common: 0, Fine: 1, Pure: 2, Radiant: 3 };
+  // How long the popup takes to settle on the grade it opens at: it shows Common first, then flashes to
+  // the grade the node rolled.
+  const REVEAL = 0.8;
+
   // Turns readings into extractions, grouped into nodes of up to three. feed(seconds, reading).
-  // opts.onDone(extraction) is called as each one finishes.
+  // opts.onDone(extraction) is called as each one finishes. Each extraction has:
+  //   openGrade  the grade it opened at (random per extraction), which sets its odds of success
+  //   grade      the grade it ended at; higher than openGrade when Ore Appraiser procs on a success
+  //   tierUp     whether Appraiser raised it; qty 2 when Plentiful Harvest's x2 orb shows, else 1
   function tracker(opts) {
     opts = Object.assign({ nodeGap: 3, full: 0.97, lost: 0.6 }, opts || {});
     const ex = [], nodes = [];
@@ -115,12 +127,20 @@
       if (!cur) return;
       cur.end = cur.result ? cur.resultAt : t;
       if (!cur.result) cur.result = 'interrupted';
-      cur.grade = mode(cur.grades.slice(-6).filter(Boolean)) || cur.firstGrade;
-      cur.tierUp = !!(cur.firstGrade && cur.grade && cur.grade !== cur.firstGrade);
-      cur.qty = cur.result === 'success' ? (cur.orb ? 2 : 1) : 0;
-      // Which item this node gives: its icon while still Common, before any tier-up changes it.
+      const before = cur.result === 'interrupted' ? cur.seen : cur.seen.filter(s => s.t < cur.resultAt);
+      const settled = before.filter(s => s.t >= cur.start + REVEAL && s.g);
+      cur.openGrade = mode((settled.length ? settled : before.filter(s => s.g)).map(s => s.g)) || cur.firstGrade;
+      const after = cur.result === 'success' ? cur.seen.filter(s => s.t >= cur.resultAt && s.g) : [];
+      cur.grade = after.length ? after[after.length - 1].g : cur.openGrade;
+      cur.tierUp = cur.result === 'success' && cur.grade in RANK && cur.openGrade in RANK && RANK[cur.grade] > RANK[cur.openGrade];
+      cur.qty = cur.result === 'success' ? (cur.x2 >= 2 ? 2 : 1) : 0;
+      // A title color that matched no grade, as hex, so it can be added.
+      if (!cur.grade && cur.oddRgb) cur.titleColor = '#' + cur.oddRgb.map(v => Math.round(v).toString(16).padStart(2, '0')).join('');
+      delete cur.oddRgb;
+      // Which item this node gives: its icon while the popup still shows Common, since the icon changes
+      // with the grade.
       cur.icon = medianIcon(cur.iconCommon.length ? cur.iconCommon : cur.iconOther);
-      delete cur.grades; delete cur.iconCommon; delete cur.iconOther;
+      delete cur.seen; delete cur.iconCommon; delete cur.iconOther;
       ex.push(cur);
       const node = nodes[nodes.length - 1];
       if (node && cur.start - node.lastEnd <= opts.nodeGap && node.ex.length < 3) { node.ex.push(cur); node.lastEnd = cur.end; }
@@ -134,29 +154,37 @@
       lastSeen = t;
       // Empty bars after a result: the next extraction at the same node has started.
       if (cur && cur.result && r.s < 0.25 && r.f < 0.25 && !r.sDone && !r.fDone) close(t);
-      if (!cur) cur = { start: t, firstGrade: r.grade, grades: [], iconCommon: [], iconOther: [], orb: false, result: null, resultAt: null };
+      if (!cur) cur = { start: t, firstGrade: r.grade, seen: [], iconCommon: [], iconOther: [], x2: 0, orb: false, result: null, resultAt: null };
       if (!cur.firstGrade && r.grade) cur.firstGrade = r.grade;
-      cur.grades.push(r.grade);
+      cur.seen.push({ t: t, g: r.grade });
+      if (!r.grade && r.gradeRgb) cur.oddRgb = r.gradeRgb;
       const icons = r.grade === 'Common' ? cur.iconCommon : cur.iconOther;
       if (r.icon && icons.length < 40) icons.push(r.icon);
       if (!cur.result && (r.sDone || r.s >= opts.full)) { cur.result = 'success'; cur.resultAt = t; }
       else if (!cur.result && (r.fDone || r.f >= opts.full)) { cur.result = 'fail'; cur.resultAt = t; }
-      if (cur.result === 'success' && r.orb) cur.orb = true;
+      // A double needs the green orb and its x2 together: Ore Appraiser's icon is green without the x2,
+      // and the edge of a Fine panel can read as white without any green.
+      if (cur.result === 'success') { if (r.x2 && r.orb) cur.x2++; if (r.orb) cur.orb = true; }
     }
     function finish(t) { close(t); return { extractions: ex, nodes: nodes }; }
     return { feed: feed, finish: finish };
   }
 
-  // Totals for a scanned recording.
+  // Totals for a set of extractions. byOpen counts attempts and successes by the grade each opened at,
+  // since that sets the odds; d (doubles) and u (Appraiser tier-ups) both happen on successes.
   function summarize(res, seconds) {
     const done = res.extractions.filter(e => e.result !== 'interrupted');
     const ok = done.filter(e => e.result === 'success');
-    const byGrade = {};
+    const byGrade = {}, byOpen = {};
     for (const e of ok) { const g = e.grade || '?'; byGrade[g] = (byGrade[g] || 0) + e.qty; }
+    for (const e of done) {
+      const g = e.openGrade || '?', o = byOpen[g] || (byOpen[g] = { x: 0, ok: 0 });
+      o.x++; if (e.result === 'success') o.ok++;
+    }
     return {
       seconds: seconds, nodes: res.nodes.length, x: done.length, ok: ok.length, fail: done.length - ok.length,
-      d: ok.filter(e => e.qty > 1).length, u: done.filter(e => e.tierUp).length,
-      sec: done.reduce((s, e) => s + (e.end - e.start), 0), items: ok.reduce((s, e) => s + e.qty, 0), byGrade: byGrade,
+      d: ok.filter(e => e.qty > 1).length, u: ok.filter(e => e.tierUp).length,
+      sec: done.reduce((s, e) => s + (e.end - e.start), 0), items: ok.reduce((s, e) => s + e.qty, 0), byGrade: byGrade, byOpen: byOpen,
       interrupted: res.extractions.length - done.length
     };
   }
@@ -210,11 +238,14 @@
     const on = [], off = [];
     rows.forEach((row, y) => { for (let x = 0; x < row.length; x++) (row[x] === '#' ? on : off).push([x0 + x, y0 + y]); });
     return {
-      ink: INK[ink || 'white'], label: !ink,
+      ink: INK[ink || 'white'], label: !ink, far: x0 > 300 || y0 < 30,
       coarse: { on: on.filter((_, i) => i % 2 === 0), off: off.filter((_, i) => i % 6 === 0) },
       fine: { on: on, off: off.filter((_, i) => i % 2 === 0) }
     };
   });
+  // The point between the two bar labels: the size search scales around it, so the labels stay put while
+  // the far anchors (the (i) icon and "Professional") settle the size.
+  const PIVOT = [86, 84];
   // Finds the popup in a frame near a rough box someone drew around it ({ x, y, w, h } in the frame's
   // pixels) by matching its fixed text: the bar labels, the (i) icon and "Professional". Returns the
   // exact box in pixels and how well the bar labels matched (0.8 to 1 when found, under 0.3 when not).
@@ -224,13 +255,19 @@
       x = Math.round(x); y = Math.round(y);
       return x >= 0 && y >= 0 && x < f.w && y < f.h && ink(d, (y * f.w + x) * ch);
     };
+    // Within a pixel: the far anchors' thin strokes would otherwise only count at the exact size.
+    const near = (ink, x, y) => {
+      x = Math.round(x); y = Math.round(y);
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if (hit(ink, x + dx, y + dy)) return true;
+      return false;
+    };
     const score = (ox, oy, s, set, labelsOnly) => {
       let total = 0, n = 0;
       for (const m of MASKS) {
         if (labelsOnly && !m.label) continue;
-        const pts = m[set];
+        const pts = m[set], on = m.far && set === 'fine' ? near : hit;
         let a = 0, b = 0;
-        for (const p of pts.on) if (hit(m.ink, ox + p[0] * s, oy + p[1] * s)) a++;
+        for (const p of pts.on) if (on(m.ink, ox + p[0] * s, oy + p[1] * s)) a++;
         for (const p of pts.off) if (hit(m.ink, ox + p[0] * s, oy + p[1] * s)) b++;
         total += a / pts.on.length - b / pts.off.length; n++;
       }
@@ -246,12 +283,18 @@
         for (let ox = rough.x - 0.25 * rough.w; ox <= rough.x + 0.25 * rough.w; ox += step) keep(ox, oy, s, score(ox, oy, s, 'coarse'));
       }
     }
+    // Settle the position on the labels, then the size by scaling around them in small steps.
     let top = null;
     for (const c of best.slice()) {
       const r = Math.max(2, Math.round(2 * c.s));
-      for (let s = c.s * 0.97; s <= c.s * 1.03; s *= 1.005) {
-        for (let oy = c.oy - r; oy <= c.oy + r; oy++) for (let ox = c.ox - r; ox <= c.ox + r; ox++) {
-          const v = score(ox, oy, s, 'fine');
+      let pin = null;
+      for (let oy = c.oy - r; oy <= c.oy + r; oy++) for (let ox = c.ox - r; ox <= c.ox + r; ox++) {
+        const v = score(ox, oy, c.s, 'fine', true);
+        if (!pin || v > pin.v) pin = { x: ox + PIVOT[0] * c.s, y: oy + PIVOT[1] * c.s, v: v };
+      }
+      for (let s = c.s * 0.88; s <= c.s * 1.12; s *= 1.0025) {
+        for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+          const ox = pin.x + dx - PIVOT[0] * s, oy = pin.y + dy - PIVOT[1] * s, v = score(ox, oy, s, 'fine');
           if (!top || v > top.v) top = { ox: ox, oy: oy, s: s, v: v };
         }
       }
