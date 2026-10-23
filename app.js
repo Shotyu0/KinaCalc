@@ -68,7 +68,7 @@
   const ID_RE = /^[A-Za-z0-9_\-.~:@+]{1,160}$/;
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
-  const BUILD = '2026-10-22f'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-10-22g'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -1998,7 +1998,7 @@
   // States: off, asking (share prompt), calibrate (find the popup), tracking, finishing, review.
   const LS_BOX = 'kina-ledger:livebox:v1';
   const LS_ICONS = 'kina-ledger:itemicons:v1';
-  const LIVE_EMPTY = { stream: null, worker: null, ex: [], kinds: [], started: 0, ended: 0, pausedAt: 0, pausedMs: 0, reading: null, snap: null, rough: null, view: null, count: 0, timer: null, countTimer: null, finTimer: null, save: false };
+  const LIVE_EMPTY = { stream: null, worker: null, ex: [], kinds: [], started: 0, ended: 0, pausedAt: 0, pausedMs: 0, reading: null, snap: null, rough: null, view: null, nodeOf: null, count: 0, timer: null, countTimer: null, finTimer: null, save: false };
   const LIVE = Object.assign({}, LIVE_EMPTY);
   function liveSupported() { return !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia && window.MediaStreamTrackProcessor && window.Worker && window.OffscreenCanvas); }
   // Where the popup sits on your screen, as fractions of the shared screen. Kept in this browser.
@@ -2035,9 +2035,29 @@
       return c.toDataURL();
     } catch (_) { return null; }
   }
-  // The kind of node an extraction came from, found or added by its item icon. A new kind takes the node
-  // its icon was named as before, if any.
+  // An item the icon matched: the first of its names that's in the game (two items can share an icon).
+  function liveItem(names) {
+    if (!names || !names.length) return null;
+    const its = names.map(n => findItem(n)).filter(Boolean);
+    return its.find(it => !reg().unavail.has(it.id)) || its[0] || null;
+  }
+  // The node an item comes from, as the Gathering tab groups grades.
+  function liveNodeOf(it) {
+    if (!it) return null;
+    if (!LIVE.nodeOf) { LIVE.nodeOf = new Map(); for (const f of gatherCalc(buildCalc())) for (const g of f.grades) LIVE.nodeOf.set(g.id, f.key); }
+    return LIVE.nodeOf.get(it.id) || null;
+  }
+  function itemTxt(names, grade) { const it = liveItem(names); return it ? it.name : grade || 'Unrecognized grade'; }
+  // The kind of node an extraction came from. An icon that matched a known item gives its node outright;
+  // otherwise kinds are told apart by the icon itself, and take the node the icon was named as before.
   function kindFor(ex, px) {
+    const node = liveNodeOf(liveItem(ex.item || ex.openItem));
+    if (node) {
+      let k = LIVE.kinds.find(x => x.auto && x.f === node);
+      if (!k) { k = { id: LIVE.kinds.length, icon: ex.icon, img: null, f: node, sure: true, picked: true, auto: true }; LIVE.kinds.push(k); }
+      if (!k.img) k.img = iconURL(px);
+      return k;
+    }
     let k = ex.icon ? LIVE.kinds.find(x => GatherReader.iconDist(x.icon, ex.icon) < GatherReader.ICON_SAME) : LIVE.kinds[LIVE.kinds.length - 1];
     if (!k) {
       const known = ex.icon ? iconNode(ex.icon) : null;
@@ -2164,10 +2184,14 @@
     for (const [f, b] of byNode) {
       const sum = GatherReader.summarize({ extractions: b.ex, nodes: [] }, 0);
       if (!sum.x) continue;
+      // Each success counts toward the item its icon named, or else the node's item of its grade
+      // (herbs call their second grade Fresh where the popup says Fine).
       const node = nodes.find(x => x.key === f), n = {};
-      for (const g of Object.keys(sum.byGrade)) {
-        const it = node && node.grades.find(x => nodeGrade(x.it.name) === g);
-        if (it) n[it.id] = (n[it.id] || 0) + sum.byGrade[g]; else lost += sum.byGrade[g];
+      for (const e of b.ex) {
+        if (e.result !== 'success' || !e.qty) continue;
+        const named = liveItem(e.item), mine = named && node && node.grades.find(x => x.id === named.id);
+        const it = mine || (node && node.grades.find(x => { const ng = nodeGrade(x.it.name); return ng === e.grade || (ng === 'Fresh' && e.grade === 'Fine'); }));
+        if (it) n[it.id] = (n[it.id] || 0) + e.qty; else lost += e.qty;
       }
       const min = Math.min(1440, Math.max(0.1, Math.round(secs * (total > 0 ? b.w / total : 1 / byNode.size) / 6) / 10));
       const g = {};
@@ -2232,7 +2256,8 @@
     const items = s => Object.keys(s.byGrade).map(g => NF0.format(s.byGrade[g]) + ' ' + esc(g)).join(' · ') || '0 items';
     const icon = k => k.img ? '<img class="kind-icon" src="' + esc(k.img) + '" alt="">' : '<span class="kind-icon"></span>';
     const recent = LIVE.ex.slice(-5).reverse().map(e => '<li>' + (kinds.length > 1 ? esc(kindLabel(LIVE.kinds[e.kind])) + ': ' : '') +
-      (e.result === 'success' ? (e.tierUp ? esc(e.openGrade) + ' → ' + esc(e.grade) + ' (Appraiser)' : esc(e.grade || 'Unrecognized grade' + (e.titleColor ? ', title color ' + e.titleColor : ''))) + ' ×' + e.qty
+      (e.result === 'success' ? (e.tierUp ? esc(itemTxt(e.openItem, e.openGrade)) + ' → ' + esc(itemTxt(e.item, e.grade)) + ' (Appraiser)'
+        : esc(itemTxt(e.item, e.grade)) + (!e.item && !e.grade && e.titleColor ? ', title color ' + e.titleColor : '')) + ' ×' + e.qty
         : e.result === 'fail' ? '<span class="loss">Failed</span>' + (e.openGrade ? ' (' + esc(e.openGrade) + ')' : '') : 'Stopped early') +
       ' · ' + NF1.format(e.end - e.start) + ' s</li>').join('');
     const opened = {};
@@ -2386,7 +2411,7 @@
       '<li><strong>Sell it all</strong> = each grade per hour × its market price after fees.</li>' +
       '<li><strong>Craft the best</strong> takes the crafts that pay most over selling their materials, and adds them while each earns more per hour of crafting than the hour so far. Your minutes per craft are added to the hour. A craft’s other materials are bought, or counted at their sell price if you gather them too.</li>' +
       '<li><strong>Buy and craft</strong> = the best expected profit with every material bought, × 60 ÷ your minutes per craft.</li>' +
-      '<li><strong>Track live</strong> reads the gathering popup from a screen share, in this browser only: when each extraction ends, whether the Success or Fail bar filled, the grade from the title color, and the ×2 orb of a double harvest. The item icon tells kinds of node apart, so a route with several is saved as one session per node, with the time split by when each extraction happened. The clock runs from when you share your screen. Tracked sessions also give the node its success, double and tier-up rates.</li></ul>' +
+      '<li><strong>Track live</strong> reads the gathering popup from a screen share, in this browser only: when each extraction ends, whether the Success or Fail bar filled, the grade from the title color, and the ×2 orb of a double harvest. The item icon is matched against the gathering icons from wikily.gg to name the item and its grade, so Pure and Radiant are told apart even when the title color isn’t, and a route with several kinds of node is saved as one session per node, with the time split by when each extraction happened. The clock runs from when you share your screen. Tracked sessions also give the node its success, double and tier-up rates.</li></ul>' +
       '<h3>Not counted</h3><ul><li>Listing fees paid in bound Kina. Your time, except on the Gathering tab. Price drops when you list many items at once, which matters most when you sell a lot of gathered materials.</li></ul></div></section>';
     return h;
   }

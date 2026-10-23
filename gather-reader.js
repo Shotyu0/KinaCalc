@@ -10,13 +10,69 @@
     sLabel: [64, 72, 110, 80], fLabel: [64, 89, 86, 97],
     // x2 stops short of the Fine panel's bright right edge, and below the (i) icon's stem.
     title: [18, 45, 230, 59], icon: [344, 40, 376, 66], x2: [360, 57, 373, 67],
-    item: [25, 72, 50, 96]         // the item's own icon, left of the bars
+    item: [25, 72, 50, 96],        // the item's own icon, left of the bars
+    slot: [20, 67.5, 35],          // the square the icon art fills: left, top, size
+    slotTop: [[21, 68], [22, 69], [52, 68], [53, 69]], slotBottom: [[21, 100], [22, 101], [52, 100], [53, 101]]
   };
+  // Known item icons (data/gather-icons.json): each an 8x8 grid of premultiplied color and coverage.
+  // The art is laid over the popup's own slot background before comparing, since the slot is tinted by
+  // grade. A match closer than MATCH_MAX, and clearly closer than the next best, names the item.
+  let ICONS = null;
+  const MATCH_MAX = 11, MATCH_GAP = 3;
+  function useIcons(data) {
+    if (!data || !Array.isArray(data.icons) || data.size !== 8) return;
+    ICONS = data.icons.map(i => ({ names: i.names, grade: i.grade, g: Array.from({ length: 64 }, (_, k) => [i.g[k * 4], i.g[k * 4 + 1], i.g[k * 4 + 2], i.g[k * 4 + 3] / 255]) }));
+  }
+  // The icon is only about 35 pixels, so a box a pixel or two off would spoil the match: each frame tries
+  // the square at small shifts and sizes and keeps the best fit. Summed-area tables of the area around
+  // the slot make each try a few lookups.
+  const WIN = [12, 60, 64, 109];
+  function matchItem(px) {
+    if (!ICONS) return null;
+    const ww = WIN[2] - WIN[0] + 1, wh = WIN[3] - WIN[1] + 1, W1 = ww + 1;
+    const sat = [new Float64Array(W1 * (wh + 1)), new Float64Array(W1 * (wh + 1)), new Float64Array(W1 * (wh + 1))];
+    for (let y = 0; y < wh; y++) {
+      const run = [0, 0, 0];
+      for (let x = 0; x < ww; x++) {
+        const c = px(WIN[0] + x, WIN[1] + y);
+        for (let k = 0; k < 3; k++) { run[k] += c[k]; sat[k][(y + 1) * W1 + x + 1] = sat[k][y * W1 + x + 1] + run[k]; }
+      }
+    }
+    // Average color of box pixels [x0, x1) x [y0, y1), clipped to the window.
+    const mean = (x0, y0, x1, y1) => {
+      x0 = Math.max(0, Math.min(ww, Math.round(x0 - WIN[0]))); x1 = Math.max(x0 + 1, Math.min(ww, Math.round(x1 - WIN[0])));
+      y0 = Math.max(0, Math.min(wh, Math.round(y0 - WIN[1]))); y1 = Math.max(y0 + 1, Math.min(wh, Math.round(y1 - WIN[1])));
+      const n = (x1 - x0) * (y1 - y0);
+      return sat.map(s => (s[y1 * W1 + x1] - s[y0 * W1 + x1] - s[y1 * W1 + x0] + s[y0 * W1 + x0]) / n);
+    };
+    const avg = (pts, dx, dy) => { const s = [0, 0, 0]; for (const p of pts) { const c = mean(p[0] + dx, p[1] + dy, p[0] + dx + 1, p[1] + dy + 1); s[0] += c[0]; s[1] += c[1]; s[2] += c[2]; } return s.map(v => v / pts.length); };
+    let best = null;
+    for (let ds = -0.5; ds <= 0.5; ds += 0.5) for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+      const ox = L.slot[0] + dx, oy = L.slot[1] + dy, cell = (L.slot[2] + ds) / 8, pop = [];
+      for (let gy = 0; gy < 8; gy++) for (let gx = 0; gx < 8; gx++) pop.push(mean(ox + gx * cell, oy + gy * cell, ox + (gx + 1) * cell, oy + (gy + 1) * cell));
+      const top = avg(L.slotTop, dx, dy), bot = avg(L.slotBottom, dx, dy);
+      let bi = -1, bd = Infinity, second = Infinity;
+      for (let n = 0; n < ICONS.length; n++) {
+        const g = ICONS[n].g;
+        let s = 0;
+        for (let i = 0; i < 64; i++) {
+          const f = ((i >> 3) + 0.5) / 8, ref = g[i], p = pop[i], a = 1 - ref[3];
+          s += Math.abs(p[0] - (ref[0] + a * (top[0] + (bot[0] - top[0]) * f))) + Math.abs(p[1] - (ref[1] + a * (top[1] + (bot[1] - top[1]) * f))) + Math.abs(p[2] - (ref[2] + a * (top[2] + (bot[2] - top[2]) * f)));
+          if (s / 192 > second) break;
+        }
+        s /= 192;
+        if (s < bd) { second = bd; bd = s; bi = n; } else if (s < second) second = s;
+      }
+      if (!best || bd < best.d) best = { i: bi, d: bd, second: second };
+    }
+    return best && best.d <= MATCH_MAX && best.second - best.d >= MATCH_GAP ? { i: best.i, d: best.d } : null;
+  }
   // Two item icons closer than this (average difference per color channel, 0-255) are the same item.
   // The same icon reads within about 1 between frames; Fine and Common Orichalcum Ore differ by about 30.
   const ICON_SAME = 14;
-  // Title colors. Common is plain white; Fine is measured, the others are guesses until seen.
-  const TITLE = [['Fine', [40, 190, 98]], ['Pure', [70, 150, 255]], ['Radiant', [255, 170, 40]]];
+  // Title colors, used when the item icon doesn't settle it. Common is plain white and Fine is measured;
+  // Pure and Radiant are the wiki's grade colors until seen in the popup.
+  const TITLE = [['Fine', [40, 190, 98]], ['Pure', [66, 169, 223]], ['Radiant', [242, 181, 42]]];
 
   function reader(f) {
     const ch = f.ch || 4, sx = f.w / REF_W, sy = f.h / REF_H;
@@ -94,7 +150,7 @@
     if (!(count(px, L.sLabel, white) >= 6 && count(px, L.fLabel, white) >= 3 && s.clean > 0.8 && fl.clean > 0.8)) return { present: false };
     const g = grade(px), span = (L.barX1 - L.scanX0) * 2;
     return {
-      present: true, s: s.frac, f: fl.frac, grade: g.name, gradeRgb: g.rgb, icon: itemIcon(px),
+      present: true, s: s.frac, f: fl.frac, grade: g.name, gradeRgb: g.rgb, icon: itemIcon(px), item: matchItem(px),
       orb: count(px, L.icon, c => c[1] > 120 && c[1] > c[0] + 35 && c[1] > c[2] + 25) >= 25,
       // The white "x2" on the Plentiful Harvest orb. The Ore Appraiser icon shows in the same spot without it.
       x2: count(px, L.x2, c => Math.min(c[0], c[1], c[2]) > 150) >= 8,
@@ -114,6 +170,8 @@
   //   openGrade  the grade it opened at (random per extraction), which sets its odds of success
   //   grade      the grade it ended at; higher than openGrade when Ore Appraiser procs on a success
   //   tierUp     whether Appraiser raised it; qty 2 when Plentiful Harvest's x2 orb shows, else 1
+  //   item       when its icon matched a known one, the item's names (icons shared by two items list both);
+  //              openItem likewise for the grade it opened at
   function tracker(opts) {
     opts = Object.assign({ nodeGap: 3, full: 0.97, lost: 0.6 }, opts || {});
     const ex = [], nodes = [];
@@ -132,6 +190,14 @@
       cur.openGrade = mode((settled.length ? settled : before.filter(s => s.g)).map(s => s.g)) || cur.firstGrade;
       const after = cur.result === 'success' ? cur.seen.filter(s => s.t >= cur.resultAt && s.g) : [];
       cur.grade = after.length ? after[after.length - 1].g : cur.openGrade;
+      // The item icon names the item outright when it matches a known one, and that beats the title color.
+      if (ICONS) {
+        const opened = mode(before.filter(s => s.t >= cur.start + REVEAL && s.item != null).map(s => s.item));
+        const ended = cur.result === 'success' ? cur.seen.filter(s => s.t >= cur.resultAt && s.item != null).map(s => s.item).pop() : undefined;
+        if (opened != null) { cur.openItem = ICONS[opened].names; cur.openGrade = ICONS[opened].grade; }
+        const fin = ended != null ? ended : opened;
+        if (fin != null) { cur.item = ICONS[fin].names; if (cur.result === 'success') cur.grade = ICONS[fin].grade; }
+      }
       cur.tierUp = cur.result === 'success' && cur.grade in RANK && cur.openGrade in RANK && RANK[cur.grade] > RANK[cur.openGrade];
       cur.qty = cur.result === 'success' ? (cur.x2 >= 2 ? 2 : 1) : 0;
       // A title color that matched no grade, as hex, so it can be added.
@@ -156,7 +222,7 @@
       if (cur && cur.result && r.s < 0.25 && r.f < 0.25 && !r.sDone && !r.fDone) close(t);
       if (!cur) cur = { start: t, firstGrade: r.grade, seen: [], iconCommon: [], iconOther: [], x2: 0, orb: false, result: null, resultAt: null };
       if (!cur.firstGrade && r.grade) cur.firstGrade = r.grade;
-      cur.seen.push({ t: t, g: r.grade });
+      cur.seen.push({ t: t, g: r.grade, item: r.item ? r.item.i : null });
       if (!r.grade && r.gradeRgb) cur.oddRgb = r.gradeRgb;
       const icons = r.grade === 'Common' ? cur.iconCommon : cur.iconOther;
       if (r.icon && icons.length < 40) icons.push(r.icon);
@@ -302,6 +368,6 @@
     return { x: top.ox, y: top.oy, w: REF_W * top.s, h: REF_H * top.s, match: score(top.ox, top.oy, top.s, 'fine', true) };
   }
 
-  const api = { read: read, tracker: tracker, summarize: summarize, locate: locate, iconDist: iconDist, ICON_SAME: ICON_SAME, ITEM_BOX: L.item, REF_W: REF_W, REF_H: REF_H };
+  const api = { read: read, tracker: tracker, summarize: summarize, locate: locate, useIcons: useIcons, iconDist: iconDist, ICON_SAME: ICON_SAME, ITEM_BOX: L.item, REF_W: REF_W, REF_H: REF_H };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.GatherReader = api;
 })(this);

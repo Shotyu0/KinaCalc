@@ -10,6 +10,7 @@
 const { spawn } = require('child_process');
 const path = require('path');
 const R = require(path.join(__dirname, '..', 'gather-reader.js'));
+try { R.useIcons(require(path.join(__dirname, '..', 'data', 'gather-icons.json'))); } catch (_) {}
 
 const args = process.argv.slice(2);
 const opt = name => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : null; };
@@ -35,7 +36,7 @@ p.stdout.on('data', d => {
 p.stderr.on('data', d => process.stderr.write(d));
 p.on('close', () => {
   const res = tr.finish(i / fps), sum = R.summarize(res, i / fps);
-  res.extractions.forEach((e, k) => console.log(`#${k + 1} node ${e.node} ${e.start.toFixed(1)}–${e.end.toFixed(1)}s ${e.result} opened ${e.openGrade || '?'}` +
+  res.extractions.forEach((e, k) => console.log(`#${k + 1} node ${e.node} ${e.start.toFixed(1)}–${e.end.toFixed(1)}s ${e.item ? e.item.join(' / ') + ': ' : ''}${e.result} opened ${e.openGrade || '?'}` +
     `${e.tierUp ? ', Appraiser to ' + e.grade : ''}${e.qty ? ' x' + e.qty : ''}${e.orb && e.qty < 2 ? ' (icon without x2)' : ''}`));
   console.log(JSON.stringify(sum));
 });

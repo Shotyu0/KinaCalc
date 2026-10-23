@@ -5,6 +5,8 @@
 'use strict';
 importScripts('gather-reader.js');
 const R = self.GatherReader, W = R.REF_W, H = R.REF_H;
+// Known item icons, to name the item and its grade. Tracking works without them, from the title color.
+fetch('data/gather-icons.json').then(r => r.ok ? r.json() : null).then(d => { if (d) R.useIcons(d); }).catch(() => {});
 const cv = new OffscreenCanvas(W, H), ctx = cv.getContext('2d', { willReadFrequently: true });
 let box = null, tr = null, paused = false, wantSnap = false, snap = null, lastPost = 0, lastT = 0, itemPx = null;
 
