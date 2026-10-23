@@ -68,7 +68,8 @@
   const ID_RE = /^[A-Za-z0-9_\-.~:@+]{1,160}$/;
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
-  const BUILD = '2026-10-23b'; // shown in the footer, to tell which version a browser is running
+  let GATHERABLE = null; // names of materials gathered from nodes, from data/gather-icons.json
+  const BUILD = '2026-10-23c'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -1899,6 +1900,7 @@
     for (const [id, list] of uses) {
       const it = getItem(id);
       if (!it || it.bound || reg().unavail.has(id) || (num(it.vendor) > 0 && !isGathered(it))) continue;
+      if (GATHERABLE && !GATHERABLE.has(norm(it.name))) continue; // drops and other crafting materials
       const net = C.E.opp.netSell(id), crafts = [];
       for (const { row, m } of list) {
         const rc = row.opp;
@@ -2041,14 +2043,15 @@
       (S.uid ? ' Your sessions and minutes per craft are yours alone.' : '') + '</p>';
     h += '<div class="filters"><div class="field"><label for="gq">Find a material</label><input id="gq" class="in" type="search" value="' + esc(UI.gatherQ) + '" data-inp="gq" placeholder="e.g. Odyle, Ore, Sapphire" autocomplete="off"></div>' +
       '<div class="field narrow"><label for="g-craft">My minutes per craft</label><input id="g-craft" class="in num" inputmode="decimal" value="' + (tC ? esc(NF2.format(tC)) : '') + '" data-chg="g-craft" placeholder="e.g. 2" autocomplete="off"></div>' +
-      '<div class="seg" role="group" aria-label="Which nodes"><button data-act="g-show" data-v="mine" aria-pressed="' + (show === 'mine') + '">I gather</button><button data-act="g-show" data-v="all" aria-pressed="' + (show === 'all') + '">All raw materials</button></div>' +
+      '<div class="seg" role="group" aria-label="Which nodes"><button data-act="g-show" data-v="mine" aria-pressed="' + (show === 'mine') + '">I gather</button><button data-act="g-show" data-v="all" aria-pressed="' + (show === 'all') + '">All gathering nodes</button></div>' +
       '<div class="seg" role="group" aria-label="Grades per hour"><button data-act="g-odds" data-v="exp" aria-pressed="' + (UI.gatherOdds !== 'raw') + '" title="Your odds from every tracked session of the same kind of node">Expected</button><button data-act="g-odds" data-v="raw" aria-pressed="' + (UI.gatherOdds === 'raw') + '" title="What your sessions here actually got">As gathered</button></div>' +
       '<label class="check"><input type="checkbox" id="g-breaks" data-chg="g-breaks"' + (UI.gatherNoBreaks ? ' checked' : '') + '> Leave out breaks</label>' +
       '<button class="btn primary" data-act="live-start"' + (!liveSupported() || UI.live.state !== 'off' ? ' disabled' : '') + ' title="' + (liveSupported() ? 'Counts every node you gather from a screen share' : 'Needs Edge or Chrome on a computer') + '">Track live</button></div>';
-    if (show === 'all') h += '<p class="help">Every material a recipe uses that no recipe makes, with the grades of one material together. Some are drops rather than gathered, so tick the ones you gather.</p>';
+    if (show === 'all') h += '<p class="help">' + (GATHERABLE ? 'Every gathering node whose materials a recipe uses (the wiki’s Gatherable Materials), with the grades of one material together. Drops like Raw Leather aren’t listed. Tick the ones you gather.'
+      : 'Every material a recipe uses that no recipe makes, with the grades of one material together. Some are drops rather than gathered, so tick the ones you gather.') + '</p>';
     if (!rows.length) {
       return h + '<section class="empty"><h2 class="sec-h">' + (q ? 'No materials match' : show === 'mine' ? 'You don’t gather anything yet' : 'No raw materials yet') + '</h2><p>' +
-        (q ? 'Clear the search to see every material.' : show === 'mine' ? 'Switch to <strong>All raw materials</strong> and tick what you gather, or open one to log a session or track it live.' : 'Raw materials show up here once a recipe uses them.') + '</p></section>';
+        (q ? 'Clear the search to see every material.' : show === 'mine' ? 'Switch to <strong>All gathering nodes</strong> and tick what you gather, or open one to log a session or track it live.' : 'Raw materials show up here once a recipe uses them.') + '</p></section>';
     }
     h += '<div class="well"><table class="grid gath"><thead><tr><th scope="col">Node</th><th class="num" scope="col">Time logged</th><th class="num" scope="col">You get per hour</th>' +
       '<th class="num" scope="col">Sell it all</th><th class="num" scope="col">Craft the best</th></tr></thead><tbody>';
@@ -3136,6 +3139,11 @@
       toast('The recipe list didn’t load. Open the page through a web server, not as a file.');
     }
     if (!CAT || !Array.isArray(CAT.recipes)) CAT = { recipes: [] };
+    // Which materials are gathered from nodes, for the Gathering tab. Without it the tab lists every raw material.
+    try {
+      const res = await fetch('data/gather-icons.json', { cache: 'no-cache' }), d = res.ok ? await res.json() : null;
+      GATHERABLE = d && Array.isArray(d.gatherable) ? new Set(d.gatherable.map(norm)) : null;
+    } catch (_) { GATHERABLE = null; }
     itemsVer++; recipesVer++;
     const foot = document.getElementById('foot');
     if (CAT.recipes.length) {

@@ -5,14 +5,20 @@
 // Re-run after a patch adds materials: node tools/build-icons.js
 //
 // Only the first page of the list is read: the site loads later pages from its /api/ path, which its
-// robots.txt asks crawlers to leave alone.
+// robots.txt asks crawlers to leave alone. So every raw material the recipes use (made by no recipe) is
+// also looked up on its own wiki page, and kept in the gatherable list when that page calls it a
+// Gatherable Material (drops like Raw Leather are Crafting Materials). Pages read are cached in
+// tools/.cache/wikily.json; pass --refresh to read them again.
 'use strict';
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 
 const PAGE = 'https://wikily.gg/aion-2/materials/gatherable';
+const ITEM = 'https://wikily.gg/aion-2/materials/';
 const OUT = path.join(__dirname, '..', 'data', 'gather-icons.json');
+const CATALOG = path.join(__dirname, '..', 'data', 'catalog.json');
+const CACHE = path.join(__dirname, '.cache', 'wikily.json');
 const UA = 'KinaLedger/1.0 (personal crafting calculator; icon matching)';
 const G = 8;
 // The site's grade names, as the gathering popup words them.
@@ -21,8 +27,17 @@ const GRADE = { Common: 'Common', Rare: 'Fine', Epic: 'Pure', Unique: 'Radiant' 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function get(url, binary) {
   const res = await fetch(url, { headers: { 'User-Agent': UA } });
+  if (res.status === 404) return null;
   if (!res.ok) throw new Error(url + ': HTTP ' + res.status);
   return binary ? Buffer.from(await res.arrayBuffer()) : res.text();
+}
+// The wiki's page name for an item: lower case, words joined by hyphens.
+const slug = name => name.toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+// Raw materials: used by a catalog recipe and made by none.
+function rawMaterials() {
+  const cat = JSON.parse(fs.readFileSync(CATALOG, 'utf8')), made = new Set(), used = new Set();
+  for (const r of cat.recipes) { made.add(r.out); if (r.comboItem) made.add(r.comboItem); for (const m of r.mats || []) used.add(m[0]); }
+  return [...used].filter(n => !made.has(n) && !/\(bound\)/i.test(n)).sort();
 }
 const decode = s => s.replace(/&#x27;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&').trim();
 
@@ -91,7 +106,27 @@ async function main() {
     console.log(e.grade.padEnd(8) + e.names.join(' / ') + '  (' + file.replace(/^[0-9a-f-]+-/, '') + ')');
     await sleep(800);
   }
-  fs.writeFileSync(OUT, JSON.stringify({ source: 'wikily.gg, Aion 2 Gatherable Materials', built: new Date().toISOString().slice(0, 10), size: G, icons: icons }));
-  console.log(icons.length + ' icons for ' + icons.reduce((s, i) => s + i.names.length, 0) + ' materials written to data/gather-icons.json');
+  // Which raw materials are gathered from nodes, from each one's own page.
+  const cache = !process.argv.includes('--refresh') && fs.existsSync(CACHE) ? JSON.parse(fs.readFileSync(CACHE, 'utf8')) : {};
+  const gatherable = new Set(icons.flatMap(i => i.names)), missing = [], drops = [];
+  for (const name of rawMaterials()) {
+    if (gatherable.has(name)) continue;
+    const key = slug(name);
+    if (!(key in cache)) {
+      const html = await get(ITEM + key);
+      const kind = html && html.match(/ext-gwe-dossier-kind">([^<]*)</);
+      cache[key] = html ? (kind ? decode(kind[1]) : '') : null;
+      fs.mkdirSync(path.dirname(CACHE), { recursive: true });
+      fs.writeFileSync(CACHE, JSON.stringify(cache));
+      await sleep(800);
+    }
+    if (cache[key] == null) missing.push(name);
+    else if (/Gatherable Material/.test(cache[key])) gatherable.add(name);
+    else drops.push(name + ' (' + (cache[key] || 'no type') + ')');
+  }
+  console.log('Not gathered: ' + drops.join(', '));
+  if (missing.length) console.log('No wiki page found, left out: ' + missing.join(', '));
+  fs.writeFileSync(OUT, JSON.stringify({ source: 'wikily.gg, Aion 2 Gatherable Materials', built: new Date().toISOString().slice(0, 10), size: G, icons: icons, gatherable: [...gatherable].sort() }));
+  console.log(icons.length + ' icons for ' + icons.reduce((s, i) => s + i.names.length, 0) + ' materials, and ' + gatherable.size + ' gatherable materials, written to data/gather-icons.json');
 }
 main().catch(e => { console.error(e.message || e); process.exit(1); });
