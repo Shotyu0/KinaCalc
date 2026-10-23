@@ -68,7 +68,7 @@
   const ID_RE = /^[A-Za-z0-9_\-.~:@+]{1,160}$/;
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
-  const BUILD = '2026-10-23a'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-10-23b'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -162,7 +162,7 @@
   }
 
   // auth: 'off' (no Firebase config) | 'pending' | 'out' | 'notmember' | 'member'. role: what this person may change.
-  const S = { items: new Map(), recipes: new Map(), settings: mergeSettings(null), ready: false, mode: 'pending', auth: 'pending', role: 'owner', email: null, uid: null, mine: null, myGather: null, myRuns: null, myCraftMin: null };
+  const S = { items: new Map(), recipes: new Map(), settings: mergeSettings(null), ready: false, mode: 'pending', auth: 'pending', role: 'owner', email: null, uid: null, mine: null, myGather: null, myRuns: null, myCraftMin: null, pool: new Map() };
   // The owner manages recipes, settings and deleting items; members update prices and their own levels.
   function canManage() { return S.mode !== 'db' || S.role === 'owner'; }
   // Your crafting levels: your own copy when the page knows who you are, otherwise the shared settings.
@@ -274,6 +274,70 @@
     }
     return by;
   }
+  // Your opening-grade counts per node, [Common, Fine, Pure, Radiant], from your tracked sessions. This is
+  // all that's shared with the other members (pool/{uid}), since the grade a node opens at is a roll of
+  // the node, the same for everyone; success, tier-ups and doubles depend on your level and skills.
+  function myPoolNodes() {
+    const nodes = {};
+    for (const r of myRuns()) {
+      if (!r.st || !r.st.g) continue;
+      const c = nodes[r.f] || (nodes[r.f] = [0, 0, 0, 0]);
+      OPEN_GRADES.forEach((g, i) => { if (r.st.g[g]) c[i] += r.st.g[g][0]; });
+    }
+    return nodes;
+  }
+  function readPool(x) {
+    const nodes = {};
+    if (x && x.nodes && typeof x.nodes === 'object') {
+      for (const f of Object.keys(x.nodes)) {
+        const c = x.nodes[f];
+        if (ID_RE.test(f) && Array.isArray(c) && c.length === 4 && c.every(v => num(v) >= 0 && num(v) < 1e7)) nodes[f] = c.map(num);
+      }
+    }
+    return { nodes: nodes };
+  }
+  let poolSent = '';
+  // Publishes your counts when they change. Signing in only fills in counts, never clears them; clearing
+  // takes removing your own sessions (saved).
+  function writePool(saved) {
+    if (!S.uid || !DB) return;
+    const nodes = myPoolNodes(), key = JSON.stringify(nodes), had = S.pool.get(S.uid);
+    if (!saved && !Object.keys(nodes).length) return;
+    if (key === poolSent || (had && JSON.stringify(had.nodes) === key)) { poolSent = key; return; }
+    poolSent = key;
+    dbWrite('pool/' + S.uid, { nodes: nodes, at: Date.now() });
+  }
+  // How often extractions open at each grade, from everyone in the shared price book (or just you): this
+  // node's counts once there are OPEN_MIN, else every node of its kind's.
+  const OPEN_MIN = 50;
+  function openOdds(f, kind) {
+    const entries = new Map(S.uid ? S.pool : []), node = [0, 0, 0, 0], all = [0, 0, 0, 0], who = new Set(), whoAll = new Set();
+    entries.set(S.uid || 'me', { nodes: myPoolNodes() });
+    for (const [uid, p] of entries) for (const key of Object.keys(p.nodes)) {
+      const c = p.nodes[key];
+      if (!c.some(v => v) || nodeKind(itemName(key)) !== kind) continue;
+      c.forEach((v, i) => { all[i] += v; }); whoAll.add(uid);
+      if (key === f) { c.forEach((v, i) => { node[i] += v; }); who.add(uid); }
+    }
+    const sum = a => a.reduce((s, v) => s + v, 0);
+    if (sum(node) >= OPEN_MIN) return { c: node, n: sum(node), people: who.size, scope: 'node' };
+    if (sum(all) >= OPEN_MIN) return { c: all, n: sum(all), people: whoAll.size, scope: 'kind' };
+    return null;
+  }
+  // Expected items of each final grade per extraction: opening grades from open (or your own), then your
+  // success rate from that grade (your overall rate for a grade you've never opened), your tier-ups from
+  // it, and your doubles.
+  function expectedItems(o, open) {
+    const items = [0, 0, 0, 0], sum = a => a.reduce((s, v) => s + v, 0), c = open ? open.c : o.open, n = sum(c);
+    const dbl = o.ok ? o.d / o.ok : 0, okAll = o.x ? o.ok / o.x : 0;
+    if (!n) return items;
+    for (let g = 0; g < 4; g++) {
+      if (!c[g]) continue;
+      const pOk = o.open[g] ? o.okBy[g] / o.open[g] : okAll, row = o.t.slice(g * 4, g * 4 + 4), rowN = sum(row);
+      for (let h = 0; h < 4; h++) items[h] += c[g] / n * pOk * (rowN ? row[h] / rowN : (h === g ? 1 : 0)) * (1 + dbl);
+    }
+    return items;
+  }
   // Odds are only used once this many extractions of a kind have been tracked.
   const ODDS_MIN = 30;
   // A gap with no extraction longer than this is a break, not moving between nodes.
@@ -286,7 +350,7 @@
   function myCraftMin() { const v = S.uid ? S.myCraftMin : S.settings.craftMin; return v > 0 ? v : null; }
   function setRuns(list) {
     list = list.slice(-RUNS_MAX);
-    if (S.uid && DB) { S.myRuns = list; writePrefs(); }
+    if (S.uid && DB) { S.myRuns = list; writePrefs(); writePool(true); }
     else Store.putSettings(Object.assign({}, S.settings, { runs: list }));
   }
   function setCraftMin(v) {
@@ -581,7 +645,7 @@
   function writeFailed(e, path) {
     const code = e && e.code;
     if (code === 'permission-denied') toast(canManage() ? 'The database refused that change. Make sure Firestore is using the latest firestore.rules.'
-      : /^users\//.test(path || '') ? 'Your settings weren’t saved: the shared price book’s rules need updating. Let the owner know.'
+      : /^(users|pool)\//.test(path || '') ? 'Your settings weren’t saved: the shared price book’s rules need updating. Let the owner know.'
       : /^reports\//.test(path || '') ? 'That report didn’t send: the shared price book’s rules need updating. Download the pictures instead, and let the owner know.'
       : 'That change wasn’t saved: only the owner can make it.');
     else if (code === 'resource-exhausted') toast('The shared price book hit today’s free usage limit. Try again tomorrow.');
@@ -1882,11 +1946,13 @@
       f.odds = odds[f.kind] && odds[f.kind].x >= ODDS_MIN ? odds[f.kind] : null;
       if (f.odds && f.track && f.track.x) {
         f.xHour = f.track.x * 60 / f.track.min;
+        f.open = openOdds(f.key, f.kind);
+        f.items = expectedItems(f.odds, f.open);
         f.expect = {};
         for (const g of f.grades) {
           const h = OPEN_GRADES.indexOf(nodeGrade(g.it.name) === 'Fresh' ? 'Fine' : nodeGrade(g.it.name));
-          g.perHourExp = h >= 0 ? f.xHour * f.odds.items[h] : 0;
-          f.expect[g.id] = h >= 0 ? f.track.x * f.odds.items[h] : 0;
+          g.perHourExp = h >= 0 ? f.xHour * f.items[h] : 0;
+          f.expect[g.id] = h >= 0 ? f.track.x * f.items[h] : 0;
           if (expected) g.perHour = g.perHourExp;
         }
         f.expected = expected;
@@ -1969,7 +2035,7 @@
       .sort((a, b) => (top(b) - top(a)) || (bestNet(b) - bestNet(a)) || a.name.localeCompare(b.name));
     const B = myBudget(), levelsSet = Object.keys(myLevels()).length > 0;
     let h = liveHTML() + gatherLead(C, nodes, tC);
-    h += '<p class="help">Gathering depends on things this page can’t know: how fast nodes respawn, other players taking them, failed extractions, double harvests and tier-ups. So it uses what you actually get. Open a node, then either track it live from a screen share, or gather for a while and log how long it took and how many of each grade you got. Every session adds to the averages. <strong>Expected</strong> uses this node’s extractions per hour with your odds from every tracked session of the same kind (ore, gems, Odyle, logs), so one lucky or unlucky Pure or Radiant doesn’t swing the hour; <strong>As gathered</strong> uses exactly what you got. <strong>Leave out breaks</strong> drops tracked gaps of over ' + BREAK_S / 60 + ' minutes without an extraction. ' +
+    h += '<p class="help">Gathering depends on things this page can’t know: how fast nodes respawn, other players taking them, failed extractions, double harvests and tier-ups. So it uses what you actually get. Open a node, then either track it live from a screen share, or gather for a while and log how long it took and how many of each grade you got. Every session adds to the averages. <strong>Expected</strong> uses this node’s extractions per hour, how often its extractions open at each grade (pooled from everyone in the price book, since that roll is the same for everyone), and your own success, tier-up and double rates from every tracked session of the same kind (ore, gems, Odyle, logs), so one lucky or unlucky Pure or Radiant doesn’t swing the hour; <strong>As gathered</strong> uses exactly what you got. <strong>Leave out breaks</strong> drops tracked gaps of over ' + BREAK_S / 60 + ' minutes without an extraction. ' +
       'Figures are Kina per hour of your time, after ' + feesTxt() + '. <strong>Craft the best</strong> crafts the grades worth more crafted and adds your minutes per craft to the hour. Each craft’s other materials are bought, or counted at their sell price if you gather them too. It assumes the market buys everything at today’s price.' +
       (levelsSet ? ' Only crafts your levels allow are counted' + (B ? ', and only ones your ' + compact(B) + ' budget covers.' : '.') : B ? ' Only crafts your ' + compact(B) + ' budget covers are counted.' : ' Set a budget on Rankings to count only crafts you can afford.') +
       (S.uid ? ' Your sessions and minutes per craft are yours alone.' : '') + '</p>';
@@ -2017,8 +2083,12 @@
       const got = tracked.reduce((s, r) => s + (r.n[g.id] || 0), 0), exp = f.expect[g.id] || 0;
       return got || exp >= 0.05 ? nodeGrade(g.it.name) + ' ' + NF0.format(got) + ' (expected ' + NF1.format(exp) + ')' : null;
     }).filter(Boolean);
-    return '<p class="note">' + (f.expected ? '<strong>Expected</strong> is ' + NF1.format(f.xHour) + ' extractions an hour here at your ' + kind + ' odds, from ' + plural(f.odds.x, 'tracked extraction') + ' on ' + plural(f.odds.nodes.size, 'node') + '. '
-      : 'Showing what you got. <strong>Expected</strong> would use your ' + kind + ' odds from ' + plural(f.odds.x, 'tracked extraction') + '. ') +
+    const op = f.open, opened = op ? OPEN_GRADES.map((g, i) => op.c[i] ? g + ' ' + pct(op.c[i] / op.n, op.c[i] / op.n < 0.01 ? 2 : 1) : null).filter(Boolean).join(', ') : '';
+    const source = op ? 'Opening grades from ' + plural(op.n, 'extraction') + (op.scope === 'node' ? ' here' : ' of every ' + kind + ' node') +
+        (op.people > 1 ? ' by ' + op.people + ' people in the price book' : '') + ' (' + opened + '). Success, tier-ups and doubles from your own ' + plural(f.odds.x, 'tracked ' + kind + ' extraction') + '. '
+      : 'Odds from your ' + plural(f.odds.x, 'tracked ' + kind + ' extraction') + ' on ' + plural(f.odds.nodes.size, 'node') + '. ';
+    return '<p class="note">' + (f.expected ? '<strong>Expected</strong> is ' + NF1.format(f.xHour) + ' extractions an hour here. ' + source
+      : 'Showing what you got. <strong>Expected</strong> would use these odds. ' + source) +
       '<strong>Your luck here</strong> over ' + plural(f.track.x, 'tracked extraction') + ': ' + luck.join(' · ') + '.</p>';
   }
   function nodeDetail(f, tC) {
@@ -2575,7 +2645,8 @@
       '<li><strong>Sell it all</strong> = each grade per hour × its market price after fees.</li>' +
       '<li><strong>Craft the best</strong> takes the crafts that pay most over selling their materials, and adds them while each earns more per hour of crafting than the hour so far. Your minutes per craft are added to the hour. A craft’s other materials are bought, or counted at their sell price if you gather them too.</li>' +
       '<li><strong>Buy and craft</strong> = the best expected profit with every material bought, × 60 ÷ your minutes per craft.</li>' +
-      '<li><strong>Track live</strong> reads the gathering popup from a screen share, in this browser only: when each extraction ends, whether the Success or Fail bar filled, the grade from the title color, and the ×2 orb of a double harvest. The item icon is matched against the gathering icons from wikily.gg to name the item and its grade, so Pure and Radiant are told apart even when the title color isn’t, and a route with several kinds of node is saved as one session per node, with the time split by when each extraction happened. The clock runs from when you share your screen. Tracked sessions also give the node its success, double and tier-up rates.</li></ul>' +
+      '<li><strong>Track live</strong> reads the gathering popup from a screen share, in this browser only: when each extraction ends, whether the Success or Fail bar filled, the grade from the title color, and the ×2 orb of a double harvest. The item icon is matched against the gathering icons from wikily.gg to name the item and its grade, so Pure and Radiant are told apart even when the title color isn’t, and a route with several kinds of node is saved as one session per node, with the time split by when each extraction happened. The clock runs from when you share your screen. Tracked sessions also give the node its success, double and tier-up rates.</li>' +
+      '<li><strong>Expected per hour</strong> = the node’s tracked extractions per hour × the chance an extraction opens at each grade × your success rate from that grade × your chance it tiers up to each grade × (1 + your double rate), then × each grade’s price. The opening grades are pooled from everyone in the shared price book, since a node’s roll is the same for everyone; only those counts are shared. The other rates are yours alone, from your tracked sessions of the same kind of node.</li></ul>' +
       '<h3>Not counted</h3><ul><li>Listing fees paid in bound Kina. Your time, except on the Gathering tab. Price drops when you list many items at once, which matters most when you sell a lot of gathered materials.</li></ul></div></section>';
     return h;
   }
@@ -3080,7 +3151,7 @@
   function useLocal() {
     for (const stop of unsubs) stop();
     unsubs = [];
-    DB = null; S.mode = 'local'; S.role = 'owner'; S.uid = null; S.mine = null; S.myGather = null; S.myRuns = null; S.myCraftMin = null;
+    DB = null; S.mode = 'local'; S.role = 'owner'; S.uid = null; S.mine = null; S.myGather = null; S.myRuns = null; S.myCraftMin = null; S.pool = new Map(); poolSent = '';
     S.items = new Map(); S.recipes = new Map(); S.settings = mergeSettings(null);
     loadLocal();
     itemsVer++; recipesVer++;
@@ -3098,15 +3169,20 @@
     for (const stop of unsubs) stop();
     unsubs = [];
     S.auth = 'member'; S.role = member.role === 'owner' ? 'owner' : 'member';
-    DB = fs; S.mode = 'db'; S.uid = user.uid; S.mine = null; S.myGather = null; S.myRuns = null; S.myCraftMin = null; S.ready = false;
+    DB = fs; S.mode = 'db'; S.uid = user.uid; S.mine = null; S.myGather = null; S.myRuns = null; S.myCraftMin = null; S.pool = new Map(); poolSent = ''; S.ready = false;
     S.items = new Map(); S.recipes = new Map();
     render();
     subscribe();
+    unsubs.push(DB.collection('pool').limit(200).onSnapshot(snap => {
+      S.pool = new Map(snap.docs.map(d => [d.id, readPool(d.data())]));
+      scheduleRender();
+    }, () => {}));
     unsubs.push(DB.doc('users/' + user.uid).onSnapshot(d => {
       const x = d.exists ? d.data() : null;
       S.mine = readLevels(x && x.levels);
       S.myGather = x && Array.isArray(x.gather) ? new Set(x.gather.filter(v => typeof v === 'string')) : null;
       S.myRuns = readRuns(x && x.runs);
+      writePool();
       S.myCraftMin = x && num(x.craftMin) > 0 ? num(x.craftMin) : null;
       itemsVer++;
       scheduleRender();

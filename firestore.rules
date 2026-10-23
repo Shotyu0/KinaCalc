@@ -76,6 +76,17 @@ service cloud.firestore {
         && (!('craftMin' in request.resource.data) || (request.resource.data.craftMin is number && request.resource.data.craftMin > 0 && request.resource.data.craftMin <= 10000));
     }
 
+    // Each member's counts of the grade their tracked extractions opened at, per node, so everyone can
+    // pool them: the grade a node opens at is the same for everyone. Members read all of them; each
+    // writes only their own, and nothing but those counts.
+    match /pool/{uid} {
+      allow read: if isMember();
+      allow write: if isMember() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['nodes', 'at'])
+        && request.resource.data.nodes is map && request.resource.data.nodes.size() <= 300
+        && optTime(request.resource.data, 'at');
+    }
+
     // Problem reports from the live gathering tracker: a picture of the popup frames and what was read.
     // Members send them under their own address; only the owner reads or deletes them.
     match /reports/{id} {
