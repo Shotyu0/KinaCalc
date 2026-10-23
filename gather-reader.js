@@ -21,7 +21,10 @@
   const MATCH_MAX = 11, MATCH_GAP = 3;
   function useIcons(data) {
     if (!data || !Array.isArray(data.icons) || data.size !== 8) return;
-    ICONS = data.icons.map(i => ({ names: i.names, grade: i.grade, g: Array.from({ length: 64 }, (_, k) => [i.g[k * 4], i.g[k * 4 + 1], i.g[k * 4 + 2], i.g[k * 4 + 3] / 255]) }));
+    ICONS = data.icons.map(i => ({
+      names: i.names, grade: i.grade, family: String(i.names[0]).replace(/^(Fresh|Fine|Pure|Radiant) /, ''),
+      g: Array.from({ length: 64 }, (_, k) => [i.g[k * 4], i.g[k * 4 + 1], i.g[k * 4 + 2], i.g[k * 4 + 3] / 255])
+    }));
   }
   // The icon is only about 35 pixels, so a box a pixel or two off would spoil the match: each frame tries
   // the square at small shifts and sizes and keeps the best fit. Summed-area tables of the area around
@@ -51,21 +54,30 @@
       const ox = L.slot[0] + dx, oy = L.slot[1] + dy, cell = (L.slot[2] + ds) / 8, pop = [];
       for (let gy = 0; gy < 8; gy++) for (let gx = 0; gx < 8; gx++) pop.push(mean(ox + gx * cell, oy + gy * cell, ox + (gx + 1) * cell, oy + (gy + 1) * cell));
       const top = avg(L.slotTop, dx, dy), bot = avg(L.slotBottom, dx, dy);
-      let bi = -1, bd = Infinity, second = Infinity;
-      for (let n = 0; n < ICONS.length; n++) {
-        const g = ICONS[n].g;
+      const ds2 = ICONS.map(ic => {
+        const g = ic.g;
         let s = 0;
         for (let i = 0; i < 64; i++) {
           const f = ((i >> 3) + 0.5) / 8, ref = g[i], p = pop[i], a = 1 - ref[3];
           s += Math.abs(p[0] - (ref[0] + a * (top[0] + (bot[0] - top[0]) * f))) + Math.abs(p[1] - (ref[1] + a * (top[1] + (bot[1] - top[1]) * f))) + Math.abs(p[2] - (ref[2] + a * (top[2] + (bot[2] - top[2]) * f)));
-          if (s / 192 > second) break;
         }
-        s /= 192;
-        if (s < bd) { second = bd; bd = s; bi = n; } else if (s < second) second = s;
-      }
-      if (!best || bd < best.d) best = { i: bi, d: bd, second: second };
+        return s / 192;
+      });
+      let bi = 0;
+      for (let n = 1; n < ds2.length; n++) if (ds2[n] < ds2[bi]) bi = n;
+      if (!best || ds2[bi] < best.d) best = { i: bi, d: ds2[bi], all: ds2 };
     }
-    return best && best.d <= MATCH_MAX && best.second - best.d >= MATCH_GAP ? { i: best.i, d: best.d } : null;
+    if (!best || best.d > MATCH_MAX) return null;
+    // Sure of the item when it beats every other icon by a margin; sure of just the material when it beats
+    // every other material's icons, though another grade of the same material comes close.
+    let other = Infinity, otherFamily = Infinity;
+    best.all.forEach((v, n) => {
+      if (n === best.i) return;
+      if (v < other) other = v;
+      if (ICONS[n].family !== ICONS[best.i].family && v < otherFamily) otherFamily = v;
+    });
+    if (otherFamily - best.d < MATCH_GAP) return null;
+    return { i: best.i, d: best.d, sure: other - best.d >= MATCH_GAP };
   }
   // Two item icons closer than this (average difference per color channel, 0-255) are the same item.
   // The same icon reads within about 1 between frames; Fine and Common Orichalcum Ore differ by about 30.
@@ -171,7 +183,9 @@
   //   grade      the grade it ended at; higher than openGrade when Ore Appraiser procs on a success
   //   tierUp     whether Appraiser raised it; qty 2 when Plentiful Harvest's x2 orb shows, else 1
   //   item       when its icon matched a known one, the item's names (icons shared by two items list both);
-  //              openItem likewise for the grade it opened at
+  //              openItem likewise for the grade it opened at; material, names of any grade of the same
+  //              material, when only that much was sure
+  //   odd        reasons it's worth a second look, for a problem report
   function tracker(opts) {
     opts = Object.assign({ nodeGap: 3, full: 0.97, lost: 0.6 }, opts || {});
     const ex = [], nodes = [];
@@ -191,18 +205,29 @@
       const after = cur.result === 'success' ? cur.seen.filter(s => s.t >= cur.resultAt && s.g) : [];
       cur.grade = after.length ? after[after.length - 1].g : cur.openGrade;
       // The item icon names the item outright when it matches a known one, and that beats the title color.
+      // When it's only sure of the material (two grades of it look alike), the grade stays with the title.
       if (ICONS) {
-        const opened = mode(before.filter(s => s.t >= cur.start + REVEAL && s.item != null).map(s => s.item));
-        const ended = cur.result === 'success' ? cur.seen.filter(s => s.t >= cur.resultAt && s.item != null).map(s => s.item).pop() : undefined;
-        if (opened != null) { cur.openItem = ICONS[opened].names; cur.openGrade = ICONS[opened].grade; }
-        const fin = ended != null ? ended : opened;
-        if (fin != null) { cur.item = ICONS[fin].names; if (cur.result === 'success') cur.grade = ICONS[fin].grade; }
+        const open = before.filter(s => s.t >= cur.start + REVEAL && s.item != null), fin = cur.result === 'success' ? cur.seen.filter(s => s.t >= cur.resultAt && s.item != null) : [];
+        const openSure = mode(open.filter(s => s.sure).map(s => s.item)), finSure = fin.filter(s => s.sure).map(s => s.item).pop();
+        const any = mode(open.map(s => s.item)) != null ? mode(open.map(s => s.item)) : fin.map(s => s.item).pop();
+        if (any != null) cur.material = ICONS[any].names;
+        if (openSure != null) { cur.openItem = ICONS[openSure].names; cur.openGrade = ICONS[openSure].grade; }
+        if (finSure != null) { cur.item = ICONS[finSure].names; cur.grade = ICONS[finSure].grade; }
+        else if (openSure != null && (cur.result !== 'success' || !after.length || cur.grade === ICONS[openSure].grade)) { cur.item = ICONS[openSure].names; if (cur.result === 'success') cur.grade = ICONS[openSure].grade; }
       }
       cur.tierUp = cur.result === 'success' && cur.grade in RANK && cur.openGrade in RANK && RANK[cur.grade] > RANK[cur.openGrade];
       cur.qty = cur.result === 'success' ? (cur.x2 >= 2 ? 2 : 1) : 0;
       // A title color that matched no grade, as hex, so it can be added.
       if (!cur.grade && cur.oddRgb) cur.titleColor = '#' + cur.oddRgb.map(v => Math.round(v).toString(16).padStart(2, '0')).join('');
       delete cur.oddRgb;
+      // Anything worth a second look, for a problem report: misreads, and rare cases to confirm.
+      cur.odd = [];
+      if (ICONS && !cur.material) cur.odd.push('item not recognized');
+      if (!cur.openGrade || (cur.result === 'success' && !cur.grade)) cur.odd.push('grade not recognized');
+      if (cur.result === 'interrupted') cur.odd.push('popup closed before a result');
+      if (cur.orb && cur.qty < 2) cur.odd.push('green icon without x2');
+      if (cur.tierUp) cur.odd.push('tier-up');
+      if (/^(Pure|Radiant)$/.test(cur.grade) || /^(Pure|Radiant)$/.test(cur.openGrade)) cur.odd.push((RANK[cur.grade] > RANK[cur.openGrade] ? cur.grade : cur.openGrade) + ' grade');
       // Which item this node gives: its icon while the popup still shows Common, since the icon changes
       // with the grade.
       cur.icon = medianIcon(cur.iconCommon.length ? cur.iconCommon : cur.iconOther);
@@ -222,7 +247,7 @@
       if (cur && cur.result && r.s < 0.25 && r.f < 0.25 && !r.sDone && !r.fDone) close(t);
       if (!cur) cur = { start: t, firstGrade: r.grade, seen: [], iconCommon: [], iconOther: [], x2: 0, orb: false, result: null, resultAt: null };
       if (!cur.firstGrade && r.grade) cur.firstGrade = r.grade;
-      cur.seen.push({ t: t, g: r.grade, item: r.item ? r.item.i : null });
+      cur.seen.push({ t: t, g: r.grade, item: r.item ? r.item.i : null, sure: !!(r.item && r.item.sure) });
       if (!r.grade && r.gradeRgb) cur.oddRgb = r.gradeRgb;
       const icons = r.grade === 'Common' ? cur.iconCommon : cur.iconOther;
       if (r.icon && icons.length < 40) icons.push(r.icon);
@@ -368,6 +393,8 @@
     return { x: top.ox, y: top.oy, w: REF_W * top.s, h: REF_H * top.s, match: score(top.ox, top.oy, top.s, 'fine', true) };
   }
 
-  const api = { read: read, tracker: tracker, summarize: summarize, locate: locate, useIcons: useIcons, iconDist: iconDist, ICON_SAME: ICON_SAME, ITEM_BOX: L.item, REF_W: REF_W, REF_H: REF_H };
+  function iconName(i) { return ICONS && ICONS[i] ? ICONS[i].names[0] : null; }
+
+  const api = { read: read, tracker: tracker, summarize: summarize, locate: locate, useIcons: useIcons, iconName: iconName, iconDist: iconDist, ICON_SAME: ICON_SAME, ITEM_BOX: L.item, REF_W: REF_W, REF_H: REF_H };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.GatherReader = api;
 })(this);

@@ -68,7 +68,7 @@
   const ID_RE = /^[A-Za-z0-9_\-.~:@+]{1,160}$/;
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
-  const BUILD = '2026-10-22g'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-10-22h'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -548,6 +548,7 @@
     const code = e && e.code;
     if (code === 'permission-denied') toast(canManage() ? 'The database refused that change. Make sure Firestore is using the latest firestore.rules.'
       : /^users\//.test(path || '') ? 'Your settings weren’t saved: the shared price book’s rules need updating. Let the owner know.'
+      : /^reports\//.test(path || '') ? 'That report didn’t send: the shared price book’s rules need updating. Download the pictures instead, and let the owner know.'
       : 'That change wasn’t saved: only the owner can make it.');
     else if (code === 'resource-exhausted') toast('The shared price book hit today’s free usage limit. Try again tomorrow.');
     else toast('A change did not save. Check your connection and try again.');
@@ -1998,7 +1999,7 @@
   // States: off, asking (share prompt), calibrate (find the popup), tracking, finishing, review.
   const LS_BOX = 'kina-ledger:livebox:v1';
   const LS_ICONS = 'kina-ledger:itemicons:v1';
-  const LIVE_EMPTY = { stream: null, worker: null, ex: [], kinds: [], started: 0, ended: 0, pausedAt: 0, pausedMs: 0, reading: null, snap: null, rough: null, view: null, nodeOf: null, count: 0, timer: null, countTimer: null, finTimer: null, save: false };
+  const LIVE_EMPTY = { stream: null, worker: null, ex: [], kinds: [], started: 0, ended: 0, pausedAt: 0, pausedMs: 0, reading: null, snap: null, rough: null, view: null, nodeOf: null, problems: [], count: 0, timer: null, countTimer: null, finTimer: null, save: false };
   const LIVE = Object.assign({}, LIVE_EMPTY);
   function liveSupported() { return !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia && window.MediaStreamTrackProcessor && window.Worker && window.OffscreenCanvas); }
   // Where the popup sits on your screen, as fractions of the shared screen. Kept in this browser.
@@ -2047,25 +2048,32 @@
     if (!LIVE.nodeOf) { LIVE.nodeOf = new Map(); for (const f of gatherCalc(buildCalc())) for (const g of f.grades) LIVE.nodeOf.set(g.id, f.key); }
     return LIVE.nodeOf.get(it.id) || null;
   }
-  function itemTxt(names, grade) { const it = liveItem(names); return it ? it.name : grade || 'Unrecognized grade'; }
-  // The kind of node an extraction came from. An icon that matched a known item gives its node outright;
-  // otherwise kinds are told apart by the icon itself, and take the node the icon was named as before.
+  // The item as read: its name when the icon was sure, else its grade and material, else just the grade.
+  function itemTxt(names, grade, material) {
+    const it = liveItem(names);
+    if (it) return it.name;
+    const m = liveItem(material);
+    if (m) { const base = m.name.replace(GRADE_RE, '$2'); return grade && grade !== 'Common' ? grade + ' ' + base : base; }
+    return grade || 'Unrecognized grade';
+  }
+  // The kind of node an extraction came from. An icon that matched a known material gives its node
+  // outright; otherwise kinds are told apart by the icon itself (against every icon a kind has shown,
+  // since the icon changes with grade), and take the node the icon was named as before.
   function kindFor(ex, px) {
-    const node = liveNodeOf(liveItem(ex.item || ex.openItem));
+    const node = liveNodeOf(liveItem(ex.item || ex.openItem || ex.material));
+    const keep = k => { if (ex.icon && k.icons.length < 8 && !k.icons.some(ic => GatherReader.iconDist(ic, ex.icon) < 2)) k.icons.push(ex.icon); if (!k.img) k.img = iconURL(px); return k; };
     if (node) {
       let k = LIVE.kinds.find(x => x.auto && x.f === node);
-      if (!k) { k = { id: LIVE.kinds.length, icon: ex.icon, img: null, f: node, sure: true, picked: true, auto: true }; LIVE.kinds.push(k); }
-      if (!k.img) k.img = iconURL(px);
-      return k;
+      if (!k) { k = { id: LIVE.kinds.length, icon: ex.icon, icons: [], img: null, f: node, sure: true, picked: true, auto: true }; LIVE.kinds.push(k); }
+      return keep(k);
     }
-    let k = ex.icon ? LIVE.kinds.find(x => GatherReader.iconDist(x.icon, ex.icon) < GatherReader.ICON_SAME) : LIVE.kinds[LIVE.kinds.length - 1];
+    let k = ex.icon ? LIVE.kinds.find(x => x.icons.some(ic => GatherReader.iconDist(ic, ex.icon) < GatherReader.ICON_SAME)) : LIVE.kinds[LIVE.kinds.length - 1];
     if (!k) {
       const known = ex.icon ? iconNode(ex.icon) : null;
-      k = { id: LIVE.kinds.length, icon: ex.icon, img: null, f: known, sure: !!known, picked: false };
+      k = { id: LIVE.kinds.length, icon: ex.icon, icons: [], img: null, f: known, sure: !!known, picked: false };
       LIVE.kinds.push(k);
     }
-    if (!k.img) k.img = iconURL(px);
-    return k;
+    return keep(k);
   }
   // Kinds that finished at least one extraction, with their totals. Tracking started from a node gives that
   // node to the unnamed kind with the most extractions, unless another kind is already that node. It's
@@ -2090,13 +2098,13 @@
     if (UI.live.state !== 'asking') { for (const t of stream.getTracks()) t.stop(); return; }
     const track = stream.getVideoTracks()[0], worker = new Worker('gather-worker.js');
     const processor = new MediaStreamTrackProcessor({ track: track });
-    Object.assign(LIVE, LIVE_EMPTY, { stream: stream, worker: worker, ex: [], kinds: [], started: Date.now() });
+    Object.assign(LIVE, LIVE_EMPTY, { stream: stream, worker: worker, ex: [], kinds: [], problems: [], started: Date.now() });
     LIVE.timer = setInterval(liveTick, 1000);
     worker.onmessage = e => liveMsg(e.data);
     // "Stop sharing" in the browser's own bar ends the session too.
     track.addEventListener('ended', () => { if (UI.live.state === 'tracking' || UI.live.state === 'calibrate') liveStop(false); });
     const box = liveBox();
-    worker.postMessage({ type: 'start', readable: processor.readable, box: box }, [processor.readable]);
+    worker.postMessage({ type: 'start', readable: processor.readable, box: box, version: BUILD }, [processor.readable]);
     if (box) liveTracking(); else { UI.live.state = 'calibrate'; render(); }
   }
   function liveTracking() {
@@ -2139,6 +2147,12 @@
       m.ex.kind = kindFor(m.ex, m.icon).id;
       LIVE.ex.push(m.ex);
       if (UI.live.state === 'tracking') scheduleRender();
+    } else if (m.type === 'problem') {
+      const p = { reasons: m.reasons, ex: m.ex, url: null, send: true, sent: false };
+      LIVE.problems.push(p);
+      const fr = new FileReader();
+      fr.onload = () => { p.url = fr.result; scheduleRender(); };
+      fr.readAsDataURL(m.sheet);
     } else if (m.type === 'ended') liveFinished();
   }
   // Stops sharing. The worker then closes the extraction in progress and says it has ended.
@@ -2157,8 +2171,8 @@
     clearTimeout(LIVE.finTimer);
     if (LIVE.worker) { LIVE.worker.terminate(); LIVE.worker = null; }
     const kinds = liveKinds();
-    if (!kinds.length) { liveReset(); toast('Tracking stopped. No gathering was seen.'); }
-    else if (LIVE.save && kinds.every(x => x.k.sure && x.k.f)) { liveSave(); liveReset(); }
+    if (!kinds.length && !LIVE.problems.length) { liveReset(); toast('Tracking stopped. No gathering was seen.'); }
+    else if (LIVE.save && kinds.every(x => x.k.sure && x.k.f) && !LIVE.problems.some(p => !p.sent)) { liveSave(); liveReset(); }
     else UI.live.state = 'review';
     render();
   }
@@ -2177,7 +2191,7 @@
       if (!byNode.has(k.f)) byNode.set(k.f, { ex: [], w: 0, icons: [] });
       const b = byNode.get(k.f);
       b.ex.push(e); b.w += w;
-      if (k.icon && b.icons.indexOf(k.icon) < 0) b.icons.push(k.icon);
+      for (const ic of k.icons && k.icons.length ? k.icons : [k.icon]) if (ic && b.icons.indexOf(ic) < 0) b.icons.push(ic);
     }
     const runs = myRuns().slice(), saved = [], now = Date.now();
     let i = 0;
@@ -2209,7 +2223,7 @@
     if (LIVE.stream) for (const t of LIVE.stream.getTracks()) t.stop();
     if (LIVE.worker) LIVE.worker.terminate();
     if (LIVE.snap) LIVE.snap.bmp.close();
-    Object.assign(LIVE, LIVE_EMPTY, { ex: [], kinds: [] });
+    Object.assign(LIVE, LIVE_EMPTY, { ex: [], kinds: [], problems: [] });
     UI.live = { state: 'off' };
   }
   // A snapshot five seconds from now, so there's time to switch back to the game.
@@ -2256,8 +2270,8 @@
     const items = s => Object.keys(s.byGrade).map(g => NF0.format(s.byGrade[g]) + ' ' + esc(g)).join(' · ') || '0 items';
     const icon = k => k.img ? '<img class="kind-icon" src="' + esc(k.img) + '" alt="">' : '<span class="kind-icon"></span>';
     const recent = LIVE.ex.slice(-5).reverse().map(e => '<li>' + (kinds.length > 1 ? esc(kindLabel(LIVE.kinds[e.kind])) + ': ' : '') +
-      (e.result === 'success' ? (e.tierUp ? esc(itemTxt(e.openItem, e.openGrade)) + ' → ' + esc(itemTxt(e.item, e.grade)) + ' (Appraiser)'
-        : esc(itemTxt(e.item, e.grade)) + (!e.item && !e.grade && e.titleColor ? ', title color ' + e.titleColor : '')) + ' ×' + e.qty
+      (e.result === 'success' ? (e.tierUp ? esc(itemTxt(e.openItem, e.openGrade, e.material)) + ' → ' + esc(itemTxt(e.item, e.grade, e.material)) + ' (Appraiser)'
+        : esc(itemTxt(e.item, e.grade, e.material)) + (!e.item && !e.grade && e.titleColor ? ', title color ' + e.titleColor : '')) + ' ×' + e.qty
         : e.result === 'fail' ? '<span class="loss">Failed</span>' + (e.openGrade ? ' (' + esc(e.openGrade) + ')' : '') : 'Stopped early') +
       ' · ' + NF1.format(e.end - e.start) + ' s</li>').join('');
     const opened = {};
@@ -2281,14 +2295,31 @@
     if (recent) h += '<div><span class="lbl">Latest</span><ul class="live-recent">' + recent + '</ul></div>';
     if (st === 'tracking') {
       h += '<div class="row-gap"><button class="btn primary" data-act="live-stop">Stop and save</button><button class="btn" data-act="live-pause">' + (paused ? 'Resume' : 'Pause') + '</button>' +
-        '<button class="btn ghost" data-act="live-recal">Find the popup again</button><button class="btn ghost danger' + (UI.confirm === 'live-discard' ? ' armed' : '') + '" data-act="live-discard">' + (UI.confirm === 'live-discard' ? 'Click again to discard' : 'Discard') + '</button></div>' +
-        '<p class="note">Switch to the game whenever you like: tracking keeps going in the background, and closing this tab stops it. Gathering more than one kind of node? Each is told apart by its item icon and saved to its own node.</p>';
+        '<button class="btn ghost" data-act="live-recal">Find the popup again</button><button class="btn ghost" data-act="live-report">Report a problem</button>' +
+        '<button class="btn ghost danger' + (UI.confirm === 'live-discard' ? ' armed' : '') + '" data-act="live-discard">' + (UI.confirm === 'live-discard' ? 'Click again to discard' : 'Discard') + '</button></div>' +
+        (LIVE.problems.length ? '<p class="help">' + plural(LIVE.problems.length, 'odd moment') + ' saved as pictures of the popup. You can send them when you stop.</p>' : '') +
+        '<p class="note">Switch to the game whenever you like: tracking keeps going in the background, and closing this tab stops it. Gathering more than one kind of node? Each is told apart by its item icon and saved to its own node. If something reads wrong, <strong>Report a problem</strong> keeps a picture of the last 15 seconds of the popup.</p>';
     } else if (st === 'review') {
-      const ready = kinds.every(x => x.k.f);
-      h += '<div class="row-gap"><button class="btn primary" data-act="live-save"' + (ready ? '' : ' disabled') + '>Save</button><button class="btn ghost danger' + (UI.confirm === 'live-discard' ? ' armed' : '') + '" data-act="live-discard">' + (UI.confirm === 'live-discard' ? 'Click again to discard' : 'Discard') + '</button>' +
+      const ready = kinds.every(x => x.k.f), unsent = S.mode === 'db' && LIVE.problems.some(p => p.send && !p.sent);
+      h += problemsHTML() +
+        '<div class="row-gap"><button class="btn primary' + (UI.confirm === 'live-save' ? ' armed' : '') + '" data-act="live-save"' + (ready ? '' : ' disabled') + '>' + (UI.confirm === 'live-save' && unsent ? 'Click again to save without sending' : 'Save') + '</button>' +
+        '<button class="btn ghost danger' + (UI.confirm === 'live-discard' ? ' armed' : '') + '" data-act="live-discard">' + (UI.confirm === 'live-discard' ? 'Click again to discard' : 'Discard') + '</button>' +
         (ready ? '' : '<span class="help">Choose a node for each icon first.</span>') + '</div>';
     }
     return h + '</section>';
+  }
+  // Pictures of odd moments, to send to the owner (or download) so misreads can be fixed.
+  function problemsHTML() {
+    const list = LIVE.problems, shared = S.mode === 'db';
+    if (!list.length) return '';
+    return '<div class="probs"><span class="lbl">Problem pictures</span><p class="help">' + plural(list.length, 'picture') + ' of the popup from moments worth a second look. Each shows the frames and what the tracker read on them. ' +
+      (shared ? 'Sending them to the owner helps fix the tracker.' : 'Download them and send them to the owner to help fix the tracker.') + ' Only the popup box is in them, nothing else from your screen.</p><ul class="prob-list">' +
+      list.map((p, i) => '<li><label class="check"><input type="checkbox" data-chg="live-prob" data-i="' + i + '"' + (p.send ? ' checked' : '') + (p.sent || !shared ? ' disabled' : '') + '> ' + esc(p.reasons.join(', ')) + '</label>' +
+        (p.sent ? ' <span class="tag gather">Sent</span>' : '') +
+        (p.url ? '<details><summary>Show the picture</summary><img class="prob-img" src="' + esc(p.url) + '" alt="Popup frames for: ' + esc(p.reasons.join(', ')) + '"></details><a class="btn small" href="' + esc(p.url) + '" download="kina-tracker-' + (i + 1) + '.jpg">Download</a>'
+          : '<span class="help">Preparing…</span>') + '</li>').join('') + '</ul>' +
+      (shared ? '<div class="field"><label for="live-note">Anything to add? (optional)</label><textarea id="live-note" class="in" rows="2" maxlength="1000" data-inp="live-note" placeholder="e.g. it was a Radiant but said Fine">' + esc(UI.live.note || '') + '</textarea></div>' +
+        '<div class="row-gap"><button class="btn" data-act="live-send">Send the ticked pictures to the owner</button></div>' : '') + '</div>';
   }
   function kindLabel(k) { return !k ? '' : k.f && k.f !== '-' ? itemName(k.f) : k.f === '-' ? 'Not saved' : 'New node, named when you stop'; }
   // The snapshot, or the part of it you zoomed into, with the box you're drawing (gold) and the popup it
@@ -2356,6 +2387,37 @@
   });
   window.addEventListener('beforeunload', e => { if (LIVE.ex.length && UI.live.state !== 'off') { e.preventDefault(); e.returnValue = ''; } });
 
+  // The owner's view of problem reports sent from live tracking. Members write them; only the owner reads.
+  async function loadReports() {
+    if (!DB || S.role !== 'owner') return;
+    UI.reports = { loading: true, list: [] };
+    render();
+    try {
+      const snap = await DB.collection('reports').orderBy('at', 'desc').limit(25).get();
+      UI.reports = { list: snap.docs.map(d => Object.assign({ id: d.id }, d.data())) };
+    } catch (_) { UI.reports = { list: [], err: 'Couldn’t load reports. Make sure Firestore is using the latest firestore.rules.' }; }
+    render();
+  }
+  const JPEG_URL = /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/;
+  function reportsHTML() {
+    if (S.mode !== 'db' || S.role !== 'owner') return '';
+    const r = UI.reports;
+    let h = '<section class="panel"><h2 class="sec-h">Tracker problem reports</h2><p class="help">Pictures of the gathering popup that members sent from live tracking, with what the tracker read on each frame. Download one to share it when fixing the tracker.</p>';
+    if (!r) return h + '<div class="row-gap"><button class="btn" data-act="reports-load">Show reports</button></div></section>';
+    if (r.loading) return h + '<p class="help">Loading…</p></section>';
+    if (r.err) h += '<p class="note loss">' + esc(r.err) + '</p>';
+    else if (!r.list.length) h += '<p class="help">None yet.</p>';
+    h += '<ul class="prob-list">' + r.list.map(x => {
+      const pic = typeof x.sheet === 'string' && JPEG_URL.test(x.sheet) ? x.sheet : null;
+      return '<li><div><strong>' + esc(x.reasons) + '</strong> <span class="help">' + esc(num(x.at) ? when(num(x.at)) : '') + ' · ' + esc(x.by) + ' · ' + esc(x.version) + '</span></div>' +
+        (x.note ? '<p class="help">“' + esc(x.note) + '”</p>' : '') + (x.ex ? '<p class="help">Read as: ' + esc(x.ex) + '</p>' : '') +
+        (pic ? '<details><summary>Show the picture</summary><img class="prob-img" src="' + esc(pic) + '" alt="Popup frames for: ' + esc(x.reasons) + '"></details>' : '<p class="help">No picture.</p>') +
+        '<div class="row-gap">' + (pic ? '<a class="btn small" href="' + esc(pic) + '" download="kina-report-' + esc(String(num(x.at) || x.id)) + '.jpg">Download</a>' : '') +
+        '<button class="btn small ghost danger' + (UI.confirm === 'rdel-' + x.id ? ' armed' : '') + '" data-act="report-del" data-id="' + esc(x.id) + '">' + (UI.confirm === 'rdel-' + x.id ? 'Click again to delete' : 'Delete') + '</button></div></li>';
+    }).join('') + '</ul>';
+    return h + '<div class="row-gap"><button class="btn small" data-act="reports-load">Refresh</button></div></section>';
+  }
+
   function settingsView() {
     const s = S.settings, lock = canManage() ? '' : ' disabled';
     let h = '<section class="panel"><h2 class="sec-h">Market and recipes</h2><div class="fgrid">' +
@@ -2396,6 +2458,7 @@
         : '<div class="field"><span class="lbl">Import</span><p class="help">Only the owner can import a full export into the shared price book. To add prices, use the Import tab.</p></div>') + '</div>' +
       (exists && canManage() ?'<div class="row-gap"><button class="btn danger' + (UI.confirm === 'rmx' ? ' armed' : '') + '" data-act="rm-examples">' + (UI.confirm === 'rmx' ? 'Click again to remove' : 'Remove example data') + '</button><span class="help">Deletes example recipes, and example items whose made-up prices you never changed.</span></div>' : '') +
       '</section>';
+    h += reportsHTML();
     h += '<section class="panel"><div class="prose"><h2 class="sec-h">How the math works</h2>' +
       '<p>Every figure is an expected value for one craft attempt, so failures and combos are priced in.</p>' +
       '<h3>Odds</h3><ul><li><strong>Success</strong> comes from the level table above for the item’s grade (Common, Rare, Epic or Unique), looked up by your level minus the recipe level, unless the recipe has its own success %.</li>' +
@@ -2639,7 +2702,30 @@
     'live-stop': () => liveStop(true),
     'live-save': () => {
       if (!liveKinds().every(x => x.k.f)) { toast('Choose a node for each icon first.'); return; }
+      if (S.mode === 'db' && LIVE.problems.some(p => p.send && !p.sent) && !arm('live-save')) return;
       liveSave(); liveReset(); render();
+    },
+    'live-report': () => { if (!LIVE.worker) return; LIVE.worker.postMessage({ type: 'report' }); toast('Saving a picture of the last 15 seconds of the popup.'); },
+    'live-send': () => {
+      if (S.mode !== 'db' || !S.email) return;
+      const todo = LIVE.problems.filter(p => p.send && !p.sent && p.url);
+      if (!todo.length) { toast('Tick at least one picture to send.'); return; }
+      let n = 0;
+      for (const p of todo) {
+        if (p.url.length > 990000) continue;
+        dbWrite('reports/' + uid('rp'), { by: S.email, at: Date.now(), version: BUILD, reasons: p.reasons.join(', ').slice(0, 300), note: String(UI.live.note || '').slice(0, 1000), ex: JSON.stringify(p.ex || {}).slice(0, 4000), sheet: p.url });
+        p.sent = true; n++;
+      }
+      toast(n ? 'Sent ' + plural(n, 'picture') + ' to the owner. Thanks!' : 'Those pictures are too large to send. Download them instead.');
+      render();
+    },
+    'reports-load': () => loadReports(),
+    'report-del': t => {
+      const id = t.dataset.id;
+      if (!arm('rdel-' + id)) return;
+      dbWrite('reports/' + id, DEL);
+      UI.reports.list = UI.reports.list.filter(r => r.id !== id);
+      render();
     },
     'live-discard': () => { if (LIVE.ex.length && !arm('live-discard')) return; liveReset(); render(); },
     'run-del': t => { const ts = +t.dataset.t; setRuns(myRuns().filter(r => !(r.f === t.dataset.f && r.t === ts))); toast('Deleted that session.'); render(); },
@@ -2768,6 +2854,7 @@
     'gather-toggle': t => { setGather([t.dataset.id], t.checked); later(); },
     'gather-node': t => { setGather(t.dataset.ids.split(' '), t.checked); later(); },
     'live-kind': t => { const k = LIVE.kinds[+t.dataset.k]; if (k) { k.f = t.value || null; k.sure = !!t.value; k.picked = true; } later(); },
+    'live-prob': t => { const p = LIVE.problems[+t.dataset.i]; if (p) p.send = t.checked; },
     'g-craft': t => {
       const raw = t.value.trim(), v = raw === '' ? null : num(raw);
       if (raw !== '' && !(v > 0 && v <= 10000)) { toast('Enter the minutes one craft takes you, like 2 or 0.5.'); later(); return; }
@@ -2819,6 +2906,7 @@
     rq: t => { UI.rankQ = t.value; UI.rankShow = PAGE; render(); },
     gq: t => { UI.gatherQ = t.value; render(); },
     run: t => { const d = runDraft(t.dataset.f); if (t.dataset.k === 'm') d.m = t.value; else d.n[t.dataset.k] = t.value; },
+    'live-note': t => { UI.live.note = t.value; },
     recq: t => { UI.recQ = t.value; UI.recShow = PAGE; render(); },
     'io-text': t => { UI.io.importText = t.value; },
     'paste-text': t => { UI.shots.pasteText = t.value; }

@@ -1,17 +1,82 @@
 // Live gathering tracker. Reads screen-share frames in the background, so tracking keeps going while
-// the game covers the page. Messages in: start { readable, box }, box { box }, snapshot, locate { rough },
-// pause { on }. Messages out: snapshot { bitmap, w, h }, located { box, match, reading }, reading { r },
-// extraction { ex }, ended.
+// the game covers the page. Messages in: start { readable, box, version }, box { box }, snapshot,
+// locate { rough }, pause { on }, report. Messages out: snapshot { bitmap, w, h }, located { box, match,
+// reading }, reading { r }, extraction { ex, icon }, problem { reasons, ex, sheet }, ended.
 'use strict';
 importScripts('gather-reader.js');
 const R = self.GatherReader, W = R.REF_W, H = R.REF_H;
 // Known item icons, to name the item and its grade. Tracking works without them, from the title color.
 fetch('data/gather-icons.json').then(r => r.ok ? r.json() : null).then(d => { if (d) R.useIcons(d); }).catch(() => {});
 const cv = new OffscreenCanvas(W, H), ctx = cv.getContext('2d', { willReadFrequently: true });
-let box = null, tr = null, paused = false, wantSnap = false, snap = null, lastPost = 0, lastT = 0, itemPx = null;
+let box = null, tr = null, paused = false, wantSnap = false, snap = null, lastPost = 0, lastT = 0, itemPx = null, version = '';
+
+// Problem reports. The last 20 seconds of the popup box are kept as small JPEGs; an odd extraction, or
+// the player's own report, turns its frames into one picture. Only the popup box is kept, never the rest
+// of the screen. At most two pictures per reason and six in all per session.
+const KEEP = 20, MAX_FRAMES = 32, recent = [], perReason = {};
+let problems = 0;
+function keepFrame(t, r) {
+  const info = r.present ? { s: r.s, f: r.f, grade: r.grade, orb: r.orb, x2: r.x2, item: r.item ? R.iconName(r.item.i) + (r.item.sure ? '' : '?') : null } : null;
+  cv.convertToBlob({ type: 'image/jpeg', quality: 0.85 }).then(blob => {
+    recent.push({ t: t, blob: blob, info: info });
+    while (recent.length && recent[0].t < lastT - KEEP) recent.shift();
+  }, () => {});
+}
+const pct = v => Math.round(v * 100) + '%';
+// One picture: a header saying what happened, then each frame with what was read from it.
+async function sheet(frames, lines) {
+  const cols = 4, capH = 18, headH = 18 * lines.length + 12, rows = Math.ceil(frames.length / cols);
+  const c = new OffscreenCanvas(cols * W, headH + rows * (H + capH)), g = c.getContext('2d');
+  g.fillStyle = '#10141c'; g.fillRect(0, 0, c.width, c.height);
+  g.fillStyle = '#e8e2d0'; g.font = '14px sans-serif';
+  lines.forEach((l, i) => g.fillText(l, 8, 18 + i * 18));
+  const t0 = frames.length ? frames[0].t : 0;
+  for (let i = 0; i < frames.length; i++) {
+    const f = frames[i], x = (i % cols) * W, y = headH + Math.floor(i / cols) * (H + capH);
+    try { const bmp = await createImageBitmap(f.blob); g.drawImage(bmp, x, y); bmp.close(); } catch (_) {}
+    const n = f.info;
+    g.fillStyle = '#c8cbd2'; g.font = '12px sans-serif';
+    g.fillText((f.t - t0).toFixed(1) + 's  ' + (n ? 'S ' + pct(n.s) + ' F ' + pct(n.f) + ' ' + (n.grade || 'grade?') + ' ' + (n.item || 'item?') + (n.orb ? ' orb' : '') + (n.x2 ? ' x2' : '') : 'no popup'), x + 4, y + H + 13);
+  }
+  return c.convertToBlob({ type: 'image/jpeg', quality: 0.72 });
+}
+// Frames between two times, thinned evenly to fit the picture.
+function framesBetween(from, to) {
+  const list = recent.filter(f => f.t >= from && f.t <= to);
+  if (list.length <= MAX_FRAMES) return list;
+  return Array.from({ length: MAX_FRAMES }, (_, i) => list[Math.round(i * (list.length - 1) / (MAX_FRAMES - 1))]);
+}
+function summary(ex) {
+  if (!ex) return null;
+  const o = {};
+  for (const k of ['result', 'openGrade', 'grade', 'qty', 'tierUp', 'titleColor', 'x2', 'orb']) if (ex[k] != null) o[k] = ex[k];
+  if (ex.item) o.item = ex.item[0]; else if (ex.material) o.material = ex.material[0];
+  o.seconds = +(ex.end - ex.start).toFixed(1);
+  return o;
+}
+function problem(reasons, from, ex) {
+  if (problems >= 6) return;
+  const fresh = reasons.filter(r => (perReason[r] || 0) < 2);
+  if (!fresh.length) return;
+  problems++;
+  for (const r of fresh) perReason[r] = (perReason[r] || 0) + 1;
+  // Wait a moment so the frames just after it are kept too.
+  setTimeout(async () => {
+    const frames = framesBetween(from, lastT), s = summary(ex);
+    const lines = ['Kina Ledger gathering tracker · ' + version + ' · ' + reasons.join(', '),
+      s ? 'Read as: ' + JSON.stringify(s) : 'Reported by the player: the last ' + Math.round(lastT - from) + ' seconds',
+      'Box ' + (box ? [box.x, box.y, box.w, box.h].map(v => v.toFixed(4)).join(', ') : 'none') + ' · ' + frames.length + ' frames, ' + (frames.length ? (frames[frames.length - 1].t - frames[0].t).toFixed(1) : 0) + ' s'];
+    try { postMessage({ type: 'problem', reasons: reasons, ex: s, sheet: await sheet(frames, lines) }); } catch (_) {}
+  }, 1500);
+}
 
 // Each finished extraction goes out with a picture of its item icon, taken while it was still Common.
-function newTracker() { tr = R.tracker({ onDone: ex => postMessage({ type: 'extraction', ex: ex, icon: itemPx }) }); }
+function newTracker() {
+  tr = R.tracker({ onDone: ex => {
+    postMessage({ type: 'extraction', ex: ex, icon: itemPx });
+    if (ex.odd && ex.odd.length) problem(ex.odd, ex.start - 1, ex);
+  } });
+}
 // Reads the popup box (fractions of the frame) from a frame or bitmap.
 function readBox(src, w, h, b) {
   ctx.drawImage(src, b.x * w, b.y * h, b.w * w, b.h * h, 0, 0, W, H);
@@ -39,14 +104,16 @@ async function pump(readable) {
       }
       if (box && tr && !paused) {
         const t = frame.timestamp / 1e6, r = readBox(frame, w, h, box);
-        tr.feed(t, r);
         lastT = t;
+        keepFrame(t, r);
+        tr.feed(t, r);
         if (t - lastPost >= 0.5) { lastPost = t; postMessage({ type: 'reading', r: { present: r.present, s: r.s, f: r.f, grade: r.grade, orb: r.orb } }); }
       }
     } finally { frame.close(); }
   }
   if (tr) tr.finish(lastT);
-  postMessage({ type: 'ended' });
+  // Give a last problem picture time to finish before saying so.
+  setTimeout(() => postMessage({ type: 'ended' }), recent.length && problems ? 1700 : 0);
 }
 // Finds the popup near a rough box (pixels of the last snapshot), reading only the area around it.
 function locate(rough) {
@@ -64,9 +131,10 @@ function locate(rough) {
 }
 onmessage = e => {
   const m = e.data;
-  if (m.type === 'start') { box = m.box || null; newTracker(); pump(m.readable); }
+  if (m.type === 'start') { box = m.box || null; version = m.version || ''; newTracker(); pump(m.readable); }
   else if (m.type === 'box') { box = m.box; newTracker(); }
   else if (m.type === 'snapshot') wantSnap = true;
   else if (m.type === 'locate') locate(m.rough);
   else if (m.type === 'pause') paused = !!m.on;
+  else if (m.type === 'report') problem(['reported by the player'], lastT - 15, null);
 };

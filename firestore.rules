@@ -76,6 +76,21 @@ service cloud.firestore {
         && (!('craftMin' in request.resource.data) || (request.resource.data.craftMin is number && request.resource.data.craftMin > 0 && request.resource.data.craftMin <= 10000));
     }
 
+    // Problem reports from the live gathering tracker: a picture of the popup frames and what was read.
+    // Members send them under their own address; only the owner reads or deletes them.
+    match /reports/{id} {
+      allow create: if isMember()
+        && request.resource.data.keys().hasOnly(['by', 'at', 'version', 'reasons', 'note', 'ex', 'sheet'])
+        && request.resource.data.by == request.auth.token.email
+        && request.resource.data.sheet is string && request.resource.data.sheet.size() < 1000000
+        && request.resource.data.note is string && request.resource.data.note.size() <= 1000
+        && request.resource.data.ex is string && request.resource.data.ex.size() <= 4000
+        && request.resource.data.reasons is string && request.resource.data.reasons.size() <= 300
+        && request.resource.data.version is string && request.resource.data.version.size() <= 40
+        && optTime(request.resource.data, 'at');
+      allow read, delete: if isOwner();
+    }
+
     // Everything else is closed.
     match /{document=**} {
       allow read, write: if false;
