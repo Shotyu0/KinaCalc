@@ -17,7 +17,7 @@ let box = null, tr = null, paused = false, wantSnap = false, snap = null, lastPo
 const KEEP = 20, MAX_FRAMES = 32, recent = [], perReason = {};
 let problems = 0;
 function keepFrame(t, r) {
-  const info = r.present ? { s: r.s, f: r.f, grade: r.grade, orb: r.orb, x2: r.x2, blue: r.blue, item: r.item ? R.iconName(r.item.i) + (r.item.sure ? '' : '?') : null } : null;
+  const info = r.present ? { s: r.s, f: r.f, grade: r.grade, orb: r.orb, x2: r.x2, luck: r.luck, blue: r.blue, item: r.item ? R.iconName(r.item.i) + (r.item.sure ? '' : '?') : null } : null;
   cv.convertToBlob({ type: 'image/jpeg', quality: 0.85 }).then(blob => {
     recent.push({ t: t, blob: blob, info: info });
     while (recent.length && recent[0].t < lastT - KEEP) recent.shift();
@@ -37,7 +37,7 @@ async function sheet(frames, lines) {
     try { const bmp = await createImageBitmap(f.blob); g.drawImage(bmp, x, y); bmp.close(); } catch (_) {}
     const n = f.info;
     g.fillStyle = '#c8cbd2'; g.font = '12px sans-serif';
-    g.fillText((f.t - t0).toFixed(1) + 's  ' + (n ? 'S ' + pct(n.s) + ' F ' + pct(n.f) + ' ' + (n.grade || 'grade?') + (mode === 'craft' ? (n.blue ? ' blue' : '') : ' ' + (n.item || 'item?') + (n.orb ? ' orb' : '') + (n.x2 ? ' x2' : '')) : 'no popup'), x + 4, y + H + 13);
+    g.fillText((f.t - t0).toFixed(1) + 's  ' + (n ? 'S ' + pct(n.s) + ' F ' + pct(n.f) + ' ' + (n.grade || 'grade?') + (mode === 'craft' ? (n.blue ? ' blue' : '') : ' ' + (n.item || 'item?') + (n.orb ? ' orb' : '') + (n.x2 ? ' x2' : '') + (n.luck ? ' luck' : '')) : 'no popup'), x + 4, y + H + 13);
   }
   return c.convertToBlob({ type: 'image/jpeg', quality: 0.72 });
 }
@@ -50,7 +50,7 @@ function framesBetween(from, to) {
 function summary(ex) {
   if (!ex) return null;
   const o = {};
-  for (const k of mode === 'craft' ? ['result', 'openGrade', 'blue', 'closedBy'] : ['result', 'openGrade', 'grade', 'qty', 'tierUp', 'titleColor', 'x2', 'orb']) if (ex[k] != null) o[k] = ex[k];
+  for (const k of mode === 'craft' ? ['result', 'openGrade', 'blue', 'closedBy'] : ['result', 'openGrade', 'grade', 'qty', 'tierUp', 'titleColor', 'x2', 'orb', 'luck']) if (ex[k] != null) o[k] = ex[k];
   if (ex.item) o.item = ex.item[0]; else if (ex.material) o.material = ex.material[0];
   o.seconds = +(ex.end - ex.start).toFixed(1);
   return o;

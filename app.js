@@ -69,7 +69,7 @@
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
   let GATHERABLE = null; // names of materials gathered from nodes, from data/gather-icons.json
-  const BUILD = '2026-10-24a'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-10-24b'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -2597,12 +2597,12 @@
     if (!list.length) return '';
     return '<div class="probs"><span class="lbl">Problem pictures</span><p class="help">' + plural(list.length, 'picture') + ' of the popup from moments worth a second look. Each shows the frames and what the tracker read on them. ' +
       (shared ? 'Sending them to the owner helps fix the tracker.' : 'Download them and send them to the owner to help fix the tracker.') + ' Only the popup box is in them, nothing else from your screen.</p><ul class="prob-list">' +
-      list.map((p, i) => '<li><label class="check"><input type="checkbox" data-chg="live-prob" data-i="' + i + '"' + (p.send ? ' checked' : '') + (p.sent || !shared ? ' disabled' : '') + '> ' + esc(p.reasons.join(', ')) + '</label>' +
-        (p.sent ? ' <span class="tag gather">Sent</span>' : '') +
+      list.map((p, i) => '<li><label class="check"><input type="checkbox" data-chg="live-prob" data-i="' + i + '"' + (p.send ? ' checked' : '') + (p.sent || p.sending || !shared ? ' disabled' : '') + '> ' + esc(p.reasons.join(', ')) + '</label>' +
+        (p.sent ? ' <span class="tag gather">Sent</span>' : p.sending ? ' <span class="help">Sending…</span>' : '') +
         (p.url ? '<details><summary>Show the picture</summary><img class="prob-img" src="' + esc(p.url) + '" alt="Popup frames for: ' + esc(p.reasons.join(', ')) + '"></details><a class="btn small" href="' + esc(p.url) + '" download="kina-tracker-' + (i + 1) + '.jpg">Download</a>'
           : '<span class="help">Preparing…</span>') + '</li>').join('') + '</ul>' +
       (shared ? '<div class="field"><label for="live-note">Anything to add? (optional)</label><textarea id="live-note" class="in" rows="2" maxlength="1000" data-inp="live-note" placeholder="e.g. it was a Radiant but said Fine">' + esc(UI.live.note || '') + '</textarea></div>' +
-        '<div class="row-gap"><button class="btn" data-act="live-send">Send the ticked pictures to the owner</button></div>' : '') + '</div>';
+        '<div class="row-gap"><button class="btn" data-act="live-send"' + (list.some(p => p.sending) ? ' disabled' : '') + '>Send the ticked pictures to the owner</button></div>' : '') + '</div>';
   }
   function kindLabel(k) { return !k ? '' : k.f && k.f !== '-' ? itemName(k.f) : k.f === '-' ? 'Not saved' : 'New node, named when you stop'; }
   // The snapshot, or the part of it you zoomed into, with the box you're drawing (gold) and the popup it
@@ -2685,7 +2685,7 @@
   function reportsHTML() {
     if (S.mode !== 'db' || S.role !== 'owner') return '';
     const r = UI.reports;
-    let h = '<section class="panel"><h2 class="sec-h">Tracker problem reports</h2><p class="help">Pictures of the gathering popup that members sent from live tracking, with what the tracker read on each frame. Download one to share it when fixing the tracker.</p>';
+    let h = '<section class="panel"><h2 class="sec-h">Tracker problem reports</h2><p class="help">Pictures of the gathering or crafting popup that members sent from live tracking, with what the tracker read on each frame. Download one to share it when fixing the tracker.</p>';
     if (!r) return h + '<div class="row-gap"><button class="btn" data-act="reports-load">Show reports</button></div></section>';
     if (r.loading) return h + '<p class="help">Loading…</p></section>';
     if (r.err) h += '<p class="note loss">' + esc(r.err) + '</p>';
@@ -3000,17 +3000,21 @@
       liveSave(); liveReset(); render();
     },
     'live-report': () => { if (!LIVE.worker) return; LIVE.worker.postMessage({ type: 'report' }); toast('Saving a picture of the last 15 seconds of the popup.'); },
-    'live-send': () => {
-      if (S.mode !== 'db' || !S.email) return;
-      const todo = LIVE.problems.filter(p => p.send && !p.sent && p.url);
+    // Each picture counts as sent once the database has it. A refused one stays ticked, to try again or
+    // download.
+    'live-send': async () => {
+      if (S.mode !== 'db' || !S.email || !DB) return;
+      const todo = LIVE.problems.filter(p => p.send && !p.sent && !p.sending && p.url);
       if (!todo.length) { toast('Tick at least one picture to send.'); return; }
-      let n = 0;
-      for (const p of todo) {
-        if (p.url.length > 990000) continue;
-        dbWrite('reports/' + uid('rp'), { by: S.email, at: Date.now(), version: BUILD, reasons: p.reasons.join(', ').slice(0, 300), note: String(UI.live.note || '').slice(0, 1000), ex: JSON.stringify(p.ex || {}).slice(0, 4000), sheet: p.url });
-        p.sent = true; n++;
-      }
-      toast(n ? 'Sent ' + plural(n, 'picture') + ' to the owner. Thanks!' : 'Those pictures are too large to send. Download them instead.');
+      const go = todo.filter(p => p.url.length <= 990000), big = todo.length - go.length;
+      if (!go.length) { toast('Those pictures are too large to send. Download them instead.'); return; }
+      for (const p of go) p.sending = true;
+      render();
+      const errs = await Promise.all(go.map(p => DB.doc('reports/' + uid('rp')).set({ by: S.email, at: Date.now(), version: BUILD, reasons: p.reasons.join(', ').slice(0, 300), note: String(UI.live.note || '').slice(0, 1000), ex: JSON.stringify(p.ex || {}).slice(0, 4000), sheet: p.url })
+        .then(() => { p.sent = true; return null; }, e => e).then(e => { p.sending = false; return e; })));
+      const failed = errs.filter(Boolean), sent = go.length - failed.length;
+      if (failed.length) writeFailed(failed[0], 'reports/');
+      else toast('Sent ' + plural(sent, 'picture') + ' to the owner. Thanks!' + (big ? ' ' + (big === 1 ? 'One was' : big + ' were') + ' too large; download ' + (big === 1 ? 'it' : 'them') + ' instead.' : ''));
       render();
     },
     'reports-load': () => loadReports(),

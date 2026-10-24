@@ -10,6 +10,9 @@
     sLabel: [64, 72, 110, 80], fLabel: [64, 89, 86, 97],
     // x2 stops short of the Fine panel's bright right edge, and below the (i) icon's stem.
     title: [18, 45, 230, 59], icon: [344, 40, 376, 66], x2: [360, 57, 373, 67],
+    // Lady Luck's badge (a proc that raises the success chance) takes the orb's spot: a blue strip with
+    // white text from about x 312, whose "ck" falls in the x2 box. This is the "Lady" part.
+    luck: [318, 49, 342, 61],
     item: [25, 72, 50, 96],        // the item's own icon, left of the bars
     slot: [20, 67.5, 35],          // the square the icon art fills: left, top, size
     slotTop: [[21, 68], [22, 69], [52, 68], [53, 69]], slotBottom: [[21, 100], [22, 101], [52, 100], [53, 101]]
@@ -175,11 +178,13 @@
     const s = bar(px, L.sRow, sFill), fl = bar(px, L.fRow, fFill);
     if (!(count(px, L.sLabel, white) >= 6 && count(px, L.fLabel, white) >= 3 && s.clean > 0.8 && fl.clean > 0.8)) return { present: false };
     const g = grade(px), span = (L.barX1 - L.scanX0) * 2;
+    const luck = count(px, L.luck, white) >= 30 && count(px, L.luck, c => c[2] > 90 && c[2] > c[0] + 40 && !white(c)) >= 60;
     return {
       present: true, s: s.frac, f: fl.frac, grade: g.name, gradeRgb: g.rgb, icon: itemIcon(px), item: opts && opts.items === false ? null : matchItem(px, g.name), blue: panelBlue(px),
       orb: count(px, L.icon, c => c[1] > 120 && c[1] > c[0] + 35 && c[1] > c[2] + 25) >= 25,
-      // The white "x2" on the Plentiful Harvest orb. The Ore Appraiser icon shows in the same spot without it.
-      x2: count(px, L.x2, c => Math.min(c[0], c[1], c[2]) > 150) >= 8,
+      // The white "x2" on the Plentiful Harvest orb. The Ore Appraiser icon shows in the same spot without
+      // it, and Lady Luck's text runs through it.
+      luck: luck, x2: !luck && count(px, L.x2, c => Math.min(c[0], c[1], c[2]) > 150) >= 8,
       sDone: count(px, [L.scanX0, L.sRow - 2, L.barX1 - 4, L.sRow + 2], sDone) > span,
       fDone: count(px, [L.scanX0, L.fRow - 2, L.barX1 - 4, L.fRow + 2], fDone) > span
     };
@@ -202,6 +207,7 @@
   //   item       when its icon matched a known one, the item's names (icons shared by two items list both);
   //              openItem likewise for the grade it opened at; material, names of any grade of the same
   //              material, when only that much was sure
+  //   luck       whether Lady Luck's badge showed (a proc that raises the success chance)
   //   odd        reasons it's worth a second look, for a problem report
   // opts.mode 'craft' reads the crafting popup, which has no item to name: only a craft cut short is odd.
   function tracker(opts) {
@@ -217,7 +223,8 @@
       if (!cur) return;
       cur.closedBy = how;
       cur.blue = cur.blues * 2 > cur.seen.length;
-      delete cur.blues;
+      cur.luck = cur.lucks >= 2;
+      delete cur.blues; delete cur.lucks;
       cur.end = cur.result ? cur.resultAt : t;
       if (!cur.result) cur.result = 'interrupted';
       const before = cur.result === 'interrupted' ? cur.seen : cur.seen.filter(s => s.t < cur.resultAt);
@@ -253,6 +260,8 @@
         if (!cur.openGrade || (cur.result === 'success' && !cur.grade)) cur.odd.push('grade not recognized');
         if (cur.result === 'interrupted') cur.odd.push('popup closed before a result');
         if (cur.orb && cur.qty < 2 && !cur.tierUp) cur.odd.push('green icon without x2');
+        // Not seen yet: how the badge and a green icon share the spot.
+        if (cur.luck && cur.orb) cur.odd.push('Lady Luck with a green icon');
         if (cur.tierUp) cur.odd.push('tier-up');
         if (/^(Pure|Radiant)$/.test(cur.grade) || /^(Pure|Radiant)$/.test(cur.openGrade)) cur.odd.push((RANK[cur.grade] > RANK[cur.openGrade] ? cur.grade : cur.openGrade) + ' grade');
       }
@@ -273,10 +282,11 @@
       lastSeen = t;
       // Empty bars after a result: the next extraction at the same node has started.
       if (cur && cur.result && r.s < 0.25 && r.f < 0.25 && !r.sDone && !r.fDone) close(t, 'reset');
-      if (!cur) cur = { start: t, firstGrade: r.grade, seen: [], iconCommon: [], iconOther: [], x2: 0, orb: false, blues: 0, result: null, resultAt: null };
+      if (!cur) cur = { start: t, firstGrade: r.grade, seen: [], iconCommon: [], iconOther: [], x2: 0, orb: false, blues: 0, lucks: 0, result: null, resultAt: null };
       if (!cur.firstGrade && r.grade) cur.firstGrade = r.grade;
       cur.seen.push({ t: t, g: r.grade, item: r.item ? r.item.i : null, sure: !!(r.item && r.item.sure) });
       if (r.blue) cur.blues++;
+      if (r.luck) cur.lucks++;
       if (!r.grade && r.gradeRgb) cur.oddRgb = r.gradeRgb;
       const icons = r.grade === 'Common' ? cur.iconCommon : cur.iconOther;
       if (r.icon && icons.length < 40) icons.push(r.icon);
