@@ -228,6 +228,8 @@ tr.detail > td { background: var(--sunk); padding: 16px; border-top: 0; }
 .grid.gath .w-num { width: 120px; }
 .grid.gath td { vertical-align: middle; }
 .grid.gath .cell-in { border-color: var(--line); background: var(--surface); }
+.grid.ev .num .sub { white-space: normal; }
+.grid.ev td.c-name { min-width: 150px; }
 .gname { display: flex; align-items: center; gap: 8px; }
 .runform { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; }
 .mini.wide { min-width: 640px; }

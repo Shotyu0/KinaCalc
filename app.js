@@ -69,7 +69,7 @@
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
   let GATHERABLE = null; // names of materials gathered from nodes, from data/gather-icons.json
-  const BUILD = '2026-10-24e'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-10-24f'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -276,9 +276,9 @@
     }
     return by;
   }
-  // Your opening-grade counts per node, [Common, Fine, Pure, Radiant], from your tracked sessions. This is
-  // all that's shared with the other members (pool/{uid}), since the grade a node opens at is a roll of
-  // the node, the same for everyone; success, tier-ups and doubles depend on your level and skills.
+  // Your opening-grade counts per node, [Common, Fine, Pure, Radiant], from your tracked sessions, shared
+  // with the other members (pool/{uid}) for the pooled opening odds: the grade a node opens at is a roll of
+  // the node, the same for everyone.
   function myPoolNodes() {
     const nodes = {};
     for (const r of myRuns()) {
@@ -288,27 +288,91 @@
     }
     return nodes;
   }
+  // Your totals per node, also shared unless you turn it off (st), for everyone's rates. From every
+  // session: minutes (m) and items (n). From tracked ones: extractions, successes, doubles, tier-ups,
+  // seconds gathering, active, moving and break seconds, and [extractions, successes] by the grade they
+  // opened at (g: Common, Fine, Pure, Radiant). No names. Success depends on each person's level and skills.
+  const POOL_KEYS = ['m', 'x', 'ok', 'd', 'u', 'sec', 'act', 'mov', 'brk'];
+  function myPoolStats() {
+    const st = {}, r1 = v => Math.round(v * 10) / 10;
+    for (const r of myRuns()) {
+      const o = st[r.f] || (st[r.f] = { m: 0, x: 0, ok: 0, d: 0, u: 0, sec: 0, act: 0, mov: 0, brk: 0, n: {}, g: [[0, 0], [0, 0], [0, 0], [0, 0]] });
+      o.m = r1(o.m + r.m);
+      for (const id of Object.keys(r.n)) o.n[id] = (o.n[id] || 0) + r.n[id];
+      if (!r.st) continue;
+      for (const k of POOL_KEYS) if (k !== 'm') o[k] = r1(o[k] + (r.st[k] || 0));
+      if (r.st.g) OPEN_GRADES.forEach((g, i) => { const v = r.st.g[g]; if (v) { o.g[i][0] += v[0]; o.g[i][1] += v[1]; } });
+    }
+    return st;
+  }
+  function readPoolStat(o) {
+    if (!o || typeof o !== 'object') return null;
+    const s = {}, ok = v => v != null && v >= 0 && v < 1e8;
+    for (const k of POOL_KEYS) { const v = num(o[k]); s[k] = ok(v) ? v : 0; }
+    s.n = {};
+    if (o.n && typeof o.n === 'object') for (const id of Object.keys(o.n)) { const v = num(o.n[id]); if (ID_RE.test(id) && ok(v)) s.n[id] = v; }
+    s.g = [0, 1, 2, 3].map(i => {
+      const v = Array.isArray(o.g) && Array.isArray(o.g[i]) ? o.g[i] : [], a = ok(num(v[0])) ? num(v[0]) : 0, b = ok(num(v[1])) ? num(v[1]) : 0;
+      return [a, Math.min(a, b)];
+    });
+    s.ok = Math.min(s.ok, s.x); s.d = Math.min(s.d, s.ok); s.u = Math.min(s.u, s.ok);
+    return s;
+  }
   function readPool(x) {
-    const nodes = {};
+    const nodes = {}, st = {};
     if (x && x.nodes && typeof x.nodes === 'object') {
       for (const f of Object.keys(x.nodes)) {
         const c = x.nodes[f];
         if (ID_RE.test(f) && Array.isArray(c) && c.length === 4 && c.every(v => num(v) >= 0 && num(v) < 1e7)) nodes[f] = c.map(num);
       }
     }
-    return { nodes: nodes };
+    if (x && x.st && typeof x.st === 'object') for (const f of Object.keys(x.st)) { const o = readPoolStat(x.st[f]); if (ID_RE.test(f) && o) st[f] = o; }
+    return { nodes: nodes, st: st, private: !!(x && x.private === true) };
   }
+  // The same data always gives the same text, whatever order its keys came in.
+  function canon(v) { return JSON.stringify(v, (k, x) => x && typeof x === 'object' && !Array.isArray(x) ? Object.keys(x).sort().reduce((o, kk) => { o[kk] = x[kk]; return o; }, {}) : x); }
   let poolSent = '';
-  // Publishes your counts when they change. Signing in only fills in counts, never clears them; clearing
-  // takes removing your own sessions (saved).
-  function writePool(saved) {
-    if (!S.uid || !DB) return;
-    const nodes = myPoolNodes(), key = JSON.stringify(nodes), had = S.pool.get(S.uid);
-    if (!saved && !Object.keys(nodes).length) return;
-    if (key === poolSent || (had && JSON.stringify(had.nodes) === key)) { poolSent = key; return; }
+  // Publishes your counts and totals when they change, once your sessions and the pool have both loaded,
+  // so a choice not to share is known first. Signing in only fills them in, never clears them; clearing
+  // takes removing your own sessions (saved). force writes even when it looks unchanged.
+  function writePool(saved, force) {
+    if (!S.uid || !DB || S.myRuns === null || !S.poolLoaded) return;
+    const had = S.pool.get(S.uid), priv = !!(had && had.private);
+    const nodes = myPoolNodes(), raw = priv ? {} : myPoolStats(), st = {};
+    for (const f of Object.keys(raw)) st[f] = readPoolStat(raw[f]);
+    if (!saved && !Object.keys(nodes).length && !Object.keys(st).length) return;
+    const key = canon([nodes, st, priv]);
+    if (!force && (key === poolSent || (had && canon([had.nodes, had.st, had.private]) === key))) { poolSent = key; return; }
     poolSent = key;
-    dbWrite('pool/' + S.uid, { nodes: nodes, at: Date.now() });
+    const body = { nodes: nodes, at: Date.now() };
+    if (Object.keys(st).length) body.st = st;
+    if (priv) body.private = true;
+    // Firestore with the older rules refuses the totals; then just the counts go, as before, so no one
+    // sees an error before the owner publishes the new rules.
+    const ref = DB.doc('pool/' + S.uid);
+    ref.set(body).catch(e => {
+      if (e && e.code === 'permission-denied' && (body.st || body.private)) ref.set({ nodes: nodes, at: body.at }).catch(e2 => writeFailed(e2, 'pool/' + S.uid));
+      else writeFailed(e, 'pool/' + S.uid);
+    });
   }
+  // Everyone's totals per node: each member's shared ones, and yours from your own sessions.
+  function communityStats() {
+    const entries = new Map(S.pool), all = new Map();
+    if (S.uid) entries.set(S.uid, { st: myPoolStats() });
+    for (const [, p] of entries) for (const f of Object.keys(p.st || {})) {
+      const s = p.st[f];
+      if (!s || !(s.m > 0 || s.x > 0)) continue;
+      const a = all.get(f) || { people: 0, m: 0, x: 0, ok: 0, d: 0, u: 0, sec: 0, act: 0, mov: 0, brk: 0, n: {}, g: [[0, 0], [0, 0], [0, 0], [0, 0]] };
+      a.people++;
+      for (const k of POOL_KEYS) a[k] += s[k] || 0;
+      for (const id of Object.keys(s.n || {})) a.n[id] = (a.n[id] || 0) + s.n[id];
+      (s.g || []).forEach((v, i) => { a.g[i][0] += v[0]; a.g[i][1] += v[1]; });
+      all.set(f, a);
+    }
+    return all;
+  }
+  // Success by the grade extractions opened at, short: "Common 92% · Fine 100%".
+  function openShort(g) { return OPEN_GRADES.map((k, i) => g[i][0] ? k + ' ' + pct(g[i][1] / g[i][0], 0) : null).filter(Boolean).join(' · '); }
   // How often extractions open at each grade, from everyone in the shared price book (or just you): this
   // node's counts once there are OPEN_MIN, else every node of its kind's.
   const OPEN_MIN = 50;
@@ -2103,7 +2167,7 @@
     if (show === 'all') h += '<p class="help">' + (GATHERABLE ? 'Every gathering node whose materials a recipe uses (the wiki’s Gatherable Materials), with the grades of one material together. Drops like Raw Leather aren’t listed. Tick the ones you gather.'
       : 'Every material a recipe uses that no recipe makes, with the grades of one material together. Some are drops rather than gathered, so tick the ones you gather.') + '</p>';
     if (!rows.length) {
-      return h + '<section class="empty"><h2 class="sec-h">' + (q ? 'No materials match' : show === 'mine' ? 'You don’t gather anything yet' : 'No raw materials yet') + '</h2><p>' +
+      return h + everyoneHTML(nodes) + '<section class="empty"><h2 class="sec-h">' + (q ? 'No materials match' : show === 'mine' ? 'You don’t gather anything yet' : 'No raw materials yet') + '</h2><p>' +
         (q ? 'Clear the search to see every material.' : show === 'mine' ? 'Switch to <strong>All gathering nodes</strong> and tick what you gather, or open one to log a session or track it live.' : 'Raw materials show up here once a recipe uses them.') + '</p></section>';
     }
     h += '<div class="well"><table class="grid gath"><thead><tr><th scope="col">Node</th><th class="num" scope="col">Time logged</th><th class="num" scope="col">You get per hour</th>' +
@@ -2128,7 +2192,42 @@
           (f.plan ? (f.plan.steps.length ? 'Kina per hour' : 'selling pays more') : !f.minutes ? 'log a session' : 'enter minutes per craft') + '</div></td></tr>';
       if (open) h += '<tr class="detail" id="gd-' + key + '"><td colspan="5">' + nodeDetail(f, tC) + '</td></tr>';
     }
-    return h + '</tbody></table></div>';
+    return h + '</tbody></table></div>' + everyoneHTML(nodes);
+  }
+  // Everyone in the price book who gathers, node by node: time, success by the grade extractions opened
+  // at, doubles, tier-ups, time per extraction, and what an hour of their logged time sells for today.
+  function evHour(f, a) {
+    const hrs = a.m / 60;
+    if (!(hrs > 0)) return { items: NaN, kina: NaN, mix: '' };
+    let items = 0, kina = 0, priced = true;
+    for (const g of f.grades) { const n = a.n[g.id] || 0; items += n; if (n) { if (g.net == null) priced = false; else kina += n * g.net; } }
+    const mix = f.grades.length > 1 && items ? f.grades.filter(g => a.n[g.id]).map(g => nodeGrade(g.it.name) + ' ' + pct(a.n[g.id] / items, a.n[g.id] / items < 0.01 ? 1 : 0)).join(' · ') : '';
+    return { items: items / hrs, kina: priced ? kina / hrs : NaN, mix: mix };
+  }
+  function everyoneHTML(nodes) {
+    if (S.mode !== 'db' || !S.uid) return '';
+    const all = communityStats(), byKey = new Map(nodes.map(f => [f.key, f])), me = S.pool.get(S.uid);
+    const rows = [...all.entries()].filter(([key]) => byKey.has(key)).sort((p, q) => q[1].m - p[1].m || q[1].x - p[1].x);
+    const people = new Set();
+    for (const [uid, p] of S.pool) if (Object.values(p.st || {}).some(o => o.m > 0 || o.x > 0)) people.add(uid);
+    if (Object.keys(myPoolStats()).length) people.add(S.uid);
+    let h = '<section class="panel"><div class="toolbar"><h2 class="sec-h">Everyone’s gathering</h2><span class="help">' + (people.size ? (people.size === 1 ? '1 person' : NF0.format(people.size) + ' people') + ' so far' : '') + '</span></div>' +
+      '<p class="help">Totals from everyone in the price book who gathers, with no names: time logged, what they got, and from tracked sessions how often extractions succeed (by the grade they opened at), double and tier up. Success depends on each person’s gathering level and skills, so this is the group’s average; yours is in each node above. Kina per hour is their logged time at today’s prices, after ' + feesTxt() + '.</p>' +
+      '<label class="check"><input type="checkbox" data-chg="pool-share"' + (me && me.private ? '' : ' checked') + '> Share my gathering totals with the group</label>';
+    if (!rows.length) return h + '<p class="help">Nothing shared yet. Totals appear as members open this version of the page.</p></section>';
+    h += '<div class="well"><table class="grid gath ev"><thead><tr><th scope="col">Node</th><th class="num" scope="col">Time</th><th class="num" scope="col">Succeeded</th>' +
+      '<th class="num" scope="col">Doubled · tiered up</th><th class="num" scope="col">Per extraction</th><th class="num" scope="col">Items per hour</th><th class="num" scope="col">Sell it all</th></tr></thead><tbody>';
+    for (const [key, a] of rows) {
+      const f = byKey.get(key), hr = evHour(f, a), timed = a.act + a.mov + a.brk;
+      h += '<tr class="row"><td class="c-name"><div class="gname">' + nameHTML(f.key) + '</div></td>' +
+        '<td class="num" data-label="Time"><div class="v">' + durTxt(a.m) + '</div><div class="sub">' + (a.people === 1 ? '1 person' : NF0.format(a.people) + ' people') + ' · ' + (a.x ? plural(a.x, 'tracked extraction') : 'logged only') + '</div></td>' +
+        '<td class="num" data-label="Succeeded"><div class="v">' + (a.x ? pct(a.ok / a.x, 0) : '—') + '</div><div class="sub">' + esc(openShort(a.g)) + '</div></td>' +
+        '<td class="num" data-label="Doubled · tiered up"><div class="v">' + (a.ok ? pct(a.d / a.ok, 0) + ' · ' + pct(a.u / a.ok, 0) : '—') + '</div><div class="sub">' + (a.ok ? 'of successes' : '') + '</div></td>' +
+        '<td class="num" data-label="Per extraction"><div class="v">' + (a.x ? NF1.format(a.sec / a.x) + ' s' : '—') + '</div><div class="sub">' + (timed ? pct(a.act / timed, 0) + ' of time active' : '') + '</div></td>' +
+        '<td class="num" data-label="Items per hour"><div class="v">' + (isFinite(hr.items) ? qfmt(hr.items) : '—') + '</div><div class="sub">' + esc(hr.mix) + '</div></td>' +
+        '<td class="num" data-label="Sell it all"><div class="v ' + tone(hr.kina) + '">' + sk(hr.kina) + '</div><div class="sub">' + (isFinite(hr.kina) ? 'Kina per hour' : 'a grade has no price') + '</div></td></tr>';
+    }
+    return h + '</tbody></table></div></section>';
   }
   // Where the expected rates come from, and how this node's tracked luck compares with them.
   function oddsNote(f) {
@@ -2184,7 +2283,22 @@
     } else if (f.plan) hour += '<p class="note">No craft earns more per hour of crafting than selling this haul does, so sell it all.</p>';
     else if (f.minutes) hour += '<p class="note">Enter your minutes per craft above to see whether crafting part of the haul pays more.</p>';
     hour += '</div>';
-    return hour + '<div class="ngrid">' + log + sessions + '</div>';
+    return hour + '<div class="ngrid">' + log + sessions + everyoneCard(f) + '</div>';
+  }
+  // Everyone's totals for this node, next to your own sessions.
+  function everyoneCard(f) {
+    if (S.mode !== 'db' || !S.uid) return '';
+    const a = communityStats().get(f.key);
+    if (!a) return '';
+    const hr = evHour(f, a);
+    return '<div class="dcard"><h4>Everyone in the price book</h4><dl class="kv">' +
+      '<dt>People</dt><dd>' + NF0.format(a.people) + '</dd><dt>Time logged</dt><dd>' + durTxt(a.m) + '</dd>' +
+      (a.x ? '<dt>Succeeded</dt><dd>' + pct(a.ok / a.x, 0) + ' of ' + plural(a.x, 'extraction') + '</dd>' + (openRatesTxt(Object.fromEntries(OPEN_GRADES.map((g, i) => [g, a.g[i]]))) ? '<dd class="why">By the grade they opened at: ' + esc(openRatesTxt(Object.fromEntries(OPEN_GRADES.map((g, i) => [g, a.g[i]])))) + '.</dd>' : '') +
+        (a.ok ? '<dt>Doubled</dt><dd>' + pct(a.d / a.ok, 0) + ' of successes</dd><dt>Tiered up</dt><dd>' + pct(a.u / a.ok, 0) + ' of successes</dd>' : '') +
+        '<dt>Per extraction</dt><dd>' + NF1.format(a.sec / a.x) + ' s</dd>' : '') +
+      (isFinite(hr.items) ? '<dt>Items per hour</dt><dd>' + qfmt(hr.items) + '</dd>' + (hr.mix ? '<dd class="why">' + esc(hr.mix) + '</dd>' : '') : '') +
+      (isFinite(hr.kina) ? '<dt>Sell it all</dt><dd class="' + tone(hr.kina) + '"><strong>' + sk(hr.kina) + '</strong> an hour</dd>' : '') +
+      '</dl><p class="note">Totals with no names. Success depends on each person’s level and skills.</p></div>';
   }
 
   /* ---------- live gathering tracker ---------- */
@@ -3329,6 +3443,14 @@
     'g-breaks': t => { UI.gatherNoBreaks = t.checked; saveUI(); later(); },
     'gather-node': t => { setGather(t.dataset.ids.split(' '), t.checked); later(); },
     'live-kind': t => { const k = LIVE.kinds[+t.dataset.k]; if (k) { k.f = t.value || null; k.sure = !!t.value; k.picked = true; } later(); },
+    'pool-share': t => {
+      if (!S.uid || !DB) return;
+      const had = S.pool.get(S.uid) || { nodes: {}, st: {}, private: false };
+      S.pool.set(S.uid, Object.assign({}, had, { private: !t.checked, st: t.checked ? had.st : {} }));
+      writePool(true, true);
+      toast(t.checked ? 'Your gathering totals are shared with the group, with no names.' : 'Your gathering totals aren’t shared any more. How often nodes open at each grade still is, for everyone’s odds.');
+      render();
+    },
     'live-limit': t => {
       const v = Math.round(num(t.value) || 0);
       LIVE.limit = v >= 1 && v <= 600 ? v : 0;
@@ -3465,7 +3587,7 @@
   function useLocal() {
     for (const stop of unsubs) stop();
     unsubs = [];
-    DB = null; S.mode = 'local'; S.role = 'owner'; S.uid = null; S.mine = null; S.myGather = null; S.myRuns = null; S.myCrafts = null; S.myCraftMin = null; S.pool = new Map(); poolSent = '';
+    DB = null; S.mode = 'local'; S.role = 'owner'; S.uid = null; S.mine = null; S.myGather = null; S.myRuns = null; S.myCrafts = null; S.myCraftMin = null; S.pool = new Map(); S.poolLoaded = false; poolSent = '';
     S.items = new Map(); S.recipes = new Map(); S.settings = mergeSettings(null);
     loadLocal();
     itemsVer++; recipesVer++;
@@ -3483,12 +3605,13 @@
     for (const stop of unsubs) stop();
     unsubs = [];
     S.auth = 'member'; S.role = member.role === 'owner' ? 'owner' : 'member';
-    DB = fs; S.mode = 'db'; S.uid = user.uid; S.mine = null; S.myGather = null; S.myRuns = null; S.myCrafts = null; S.myCraftMin = null; S.pool = new Map(); poolSent = ''; S.ready = false;
+    DB = fs; S.mode = 'db'; S.uid = user.uid; S.mine = null; S.myGather = null; S.myRuns = null; S.myCrafts = null; S.myCraftMin = null; S.pool = new Map(); S.poolLoaded = false; poolSent = ''; S.ready = false;
     S.items = new Map(); S.recipes = new Map();
     render();
     subscribe();
     unsubs.push(DB.collection('pool').limit(200).onSnapshot(snap => {
       S.pool = new Map(snap.docs.map(d => [d.id, readPool(d.data())]));
+      if (!S.poolLoaded) { S.poolLoaded = true; writePool(); }
       scheduleRender();
     }, () => {}));
     unsubs.push(DB.doc('users/' + user.uid).onSnapshot(d => {
