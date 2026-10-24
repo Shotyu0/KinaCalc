@@ -69,7 +69,7 @@
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
   let GATHERABLE = null; // names of materials gathered from nodes, from data/gather-icons.json
-  const BUILD = '2026-10-23c'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-10-23d'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -133,7 +133,7 @@
     return total > 50 ? 'Professional Lv ' + (total - 50) : 'Novice Lv ' + total;
   }
   function mergeSettings(d) {
-    const s = { tax: 10, listFee: 2, failLoss: 100, levels: {}, showPending: false, runs: [], craftMin: null };
+    const s = { tax: 10, listFee: 2, failLoss: 100, levels: {}, showPending: false, runs: [], crafts: [], craftMin: null };
     if (d && typeof d === 'object') {
       s.showPending = !!d.showPending;
       if (num(d.tax) != null) s.tax = num(d.tax);
@@ -141,6 +141,7 @@
       if (num(d.failLoss) != null) s.failLoss = num(d.failLoss);
       s.levels = readLevels(d.levels);
       s.runs = readRuns(d.runs);
+      s.crafts = readCrafts(d.crafts);
       if (num(d.craftMin) > 0) s.craftMin = num(d.craftMin);
     }
     return s;
@@ -163,7 +164,7 @@
   }
 
   // auth: 'off' (no Firebase config) | 'pending' | 'out' | 'notmember' | 'member'. role: what this person may change.
-  const S = { items: new Map(), recipes: new Map(), settings: mergeSettings(null), ready: false, mode: 'pending', auth: 'pending', role: 'owner', email: null, uid: null, mine: null, myGather: null, myRuns: null, myCraftMin: null, pool: new Map() };
+  const S = { items: new Map(), recipes: new Map(), settings: mergeSettings(null), ready: false, mode: 'pending', auth: 'pending', role: 'owner', email: null, uid: null, mine: null, myGather: null, myRuns: null, myCrafts: null, myCraftMin: null, pool: new Map() };
   // The owner manages recipes, settings and deleting items; members update prices and their own levels.
   function canManage() { return S.mode !== 'db' || S.role === 'owner'; }
   // Your crafting levels: your own copy when the page knows who you are, otherwise the shared settings.
@@ -347,6 +348,25 @@
   function openRatesTxt(g) {
     return OPEN_GRADES.filter(k => g && g[k] && g[k][0]).map(k => k + ' ' + g[k][1] + ' of ' + g[k][0] + ' (' + pct(g[k][1] / g[k][0], 0) + ')').join(' · ');
   }
+  // Your crafting sessions from live tracking: { r: recipe, t: when, m: minutes, x: crafts, ok: successes,
+  // cp: combo procs, cok: combo crafts that landed (a Splendent), spc: seconds per craft, lv: your level }.
+  function readCrafts(list) {
+    if (!Array.isArray(list)) return [];
+    const out = [];
+    for (const c of list) {
+      if (!c || typeof c.r !== 'string' || !ID_RE.test(c.r)) continue;
+      const o = { r: c.r };
+      for (const k of ['t', 'm', 'x', 'ok', 'cp', 'cok', 'spc', 'lv']) { const v = num(c[k]); o[k] = v >= 0 && v < 1e13 ? v : 0; }
+      if (o.x > 0 && o.ok <= o.x && o.cp <= o.ok && o.cok <= o.cp) out.push(o);
+    }
+    return out.slice(-RUNS_MAX);
+  }
+  function myCrafts() { return S.uid ? (S.myCrafts || []) : (S.settings.crafts || []); }
+  function setCrafts(list) {
+    list = list.slice(-RUNS_MAX);
+    if (S.uid && DB) { S.myCrafts = list; writePrefs(); }
+    else Store.putSettings(Object.assign({}, S.settings, { crafts: list }));
+  }
   function myRuns() { return S.uid ? (S.myRuns || []) : (S.settings.runs || []); }
   function myCraftMin() { const v = S.uid ? S.myCraftMin : S.settings.craftMin; return v > 0 ? v : null; }
   function setRuns(list) {
@@ -363,6 +383,7 @@
     const body = { levels: myLevels(), gather: [...myGather()] };
     // Left out until used, so saving levels still works under rules from before the Gathering tab.
     if (myRuns().length) body.runs = myRuns();
+    if (myCrafts().length) body.crafts = myCrafts();
     if (myCraftMin() != null) body.craftMin = myCraftMin();
     dbWrite('users/' + S.uid, body);
   }
@@ -668,7 +689,7 @@
     putSettings(s) {
       S.settings = s;
       if (!DB) { saveLocal(); return; }
-      const shared = clean(s); delete shared.runs; delete shared.craftMin; // personal, kept in users/{uid}
+      const shared = clean(s); delete shared.runs; delete shared.crafts; delete shared.craftMin; // personal, kept in users/{uid}
       dbWrite('config/settings', shared);
     }
   };
@@ -1086,7 +1107,7 @@
     if (!UI.rankAll) rows = rankable;
     rows = rows.slice().sort((a, b) => (sortKey(b) - sortKey(a)) || itemName(a.r.output).localeCompare(itemName(b.r.output)));
 
-    let h = leadHTML(C, rankable);
+    let h = (UI.live.mode === 'craft' ? liveHTML() : '') + leadHTML(C, rankable);
     if (hasExamples()) {
       h += '<div class="notice"><span>Some <strong>Example</strong> data with made-up prices is still in your ledger.</span>' +
         '<button class="btn small' + (UI.confirm === 'rmx' ? ' danger armed' : '') + '" data-act="rm-examples">' + (UI.confirm === 'rmx' ? 'Click again to remove' : 'Remove examples') + '</button></div>';
@@ -1259,6 +1280,7 @@
       '<div class="dcard"><h4>Cost per Splendent · ' + METRIC[scn].short + '</h4>' + mats + '</div>' +
       '<div class="dcard"><h4>Sell it or keep it</h4>' + use + '</div>' +
       '</div><div class="dcard dwide"><h4>Risk and reward · one craft of ' + esc(baseName) + '</h4>' + riskHTML(rc) + '</div>' +
+      craftTrackHTML({ r: base, [scn]: rc }) +
       '<div class="dcard dwide"><h4>Plan your crafts</h4>' + comboPlanHTML(C, row) + '</div>' +
       '<div class="row-gap dfoot">' + (canManage() ? '<button class="btn" data-act="edit" data-id="' + esc(base.id) + '">Edit ' + esc(baseName) + ' recipe</button>' : '') +
       '<button class="btn ghost" data-act="find-price" data-id="' + esc(row.r.output) + '">Price history</button></div>';
@@ -1318,9 +1340,32 @@
       '<div class="dcard"><h4>Odds per attempt</h4>' + odds + '</div>' +
       '<div class="dcard"><h4>Materials · ' + METRIC[scn].short + '</h4>' + mats + '</div>' +
       '<div class="dcard"><h4>Plan a batch</h4>' + planHTML(C, row) + '</div>' +
-      '</div><div class="dcard dwide"><h4>Risk and reward · ' + METRIC[scn].short + '</h4>' + riskHTML(rc) + '</div>' +
+      '</div><div class="dcard dwide"><h4>Risk and reward · ' + METRIC[scn].short + '</h4>' + riskHTML(rc) + '</div>' + craftTrackHTML(row) +
       '<div class="row-gap dfoot">' + (canManage() ? '<button class="btn" data-act="edit" data-id="' + esc(r.id) + '">Edit recipe</button>' : '') +
       '<button class="btn ghost" data-act="find-price" data-id="' + esc(r.output) + '">Price history</button>' + (r.notes ? '<span class="note">' + esc(r.notes) + '</span>' : '') + '</div>';
+  }
+  // Your live-tracked crafting of a recipe against the tables: success, combo procs and landings, and time
+  // per craft, which also gives Kina an hour at that speed.
+  function craftTrackHTML(row) {
+    const r = row.r, rc = row[UI.metric], list = myCrafts().filter(c => c.r === r.id).sort((a, b) => b.t - a.t);
+    const btn = '<button class="btn" data-act="live-craft" data-r="' + esc(r.id) + '"' + (!liveSupported() || UI.live.state !== 'off' ? ' disabled' : '') + '>Track crafting live</button>';
+    let h = '<div class="dcard dwide"><h4>Your crafting</h4>';
+    if (!list.length) {
+      return h + '<p class="help">Track crafting live to measure your real success rate, combo procs and time per craft for this recipe. ' +
+        (liveSupported() ? 'It reads the crafting popup from a screen share, in this browser only.' : 'It needs Edge or Chrome on a computer.') + '</p><div class="row-gap">' + btn + '</div></div>';
+    }
+    const t = list.reduce((a, c) => ({ x: a.x + c.x, ok: a.ok + c.ok, cp: a.cp + c.cp, cok: a.cok + c.cok, sec: a.sec + (c.spc > 0 ? c.spc * c.x : 0), n: a.n + (c.spc > 0 ? c.x : 0) }), { x: 0, ok: 0, cp: 0, cok: 0, sec: 0, n: 0 });
+    const spc = t.n ? t.sec / t.n : NaN, perHour = spc > 0 ? 3600 / spc : NaN;
+    h += '<dl class="kv"><dt>Succeeded</dt><dd>' + pct(t.ok / t.x) + ' of ' + plural(t.x, 'craft') + '</dd><dd class="why">The table gives ' + pct(rc.pS) + ' at your level now.' + (t.x < 50 ? ' It takes a few dozen crafts for this to be a fair comparison.' : '') + '</dd>' +
+      (rc.c > 0 ? '<dt>Combo procs</dt><dd>' + (t.ok ? pct(t.cp / t.ok, 0) + ' of successes' : '—') + '</dd><dd class="why">Expected ' + pct(rc.c, 0) + '.</dd>' +
+        '<dt>Combo crafts landed</dt><dd>' + (t.cp ? t.cok + ' of ' + t.cp : '—') + '</dd><dd class="why">The table gives ' + pct(rc.cs) + '.</dd>' : '') +
+      '<dt>Time per craft</dt><dd>' + (isFinite(spc) ? NF1.format(spc) + ' s' : '—') + '</dd>' +
+      (isFinite(perHour) && isFinite(rc.profit) ? '<dt>At that speed</dt><dd class="' + tone(rc.profit) + '"><strong>' + sk(rc.profit * perHour) + '</strong> an hour</dd><dd class="why">' + NF1.format(perHour) + ' crafts an hour × ' + sk(rc.profit) + ' per attempt (' + METRIC[UI.metric].short + '), with the materials in hand.</dd>' : '') + '</dl>' +
+      '<div class="mini-well"><table class="mini"><thead><tr><th>When</th><th class="num">Crafts</th><th class="num">Succeeded</th><th class="num">Combos</th><th class="num">Per craft</th><th><span class="sr">Delete</span></th></tr></thead><tbody>' +
+      list.map(c => '<tr><td>' + esc(when(c.t)) + '</td><td class="num">' + c.x + '</td><td class="num">' + c.ok + '</td><td class="num">' + c.cok + ' of ' + c.cp + '</td><td class="num">' + (c.spc ? NF1.format(c.spc) + ' s' : '—') + '</td>' +
+        '<td><button class="btn small ghost" data-act="craft-del" data-r="' + esc(r.id) + '" data-t="' + c.t + '" aria-label="Delete the crafting session from ' + esc(when(c.t)) + '">Delete</button></td></tr>').join('') + '</tbody></table></div>' +
+      '<div class="row-gap">' + btn + '</div></div>';
+    return h;
   }
   function treeRows(E, list, rcParent, depth, mult, path) {
     const rcList = E.recipe(rcParent.r);
@@ -2026,6 +2071,14 @@
       '<div class="lead-figs"><span class="big ' + tone(w.v) + '">' + sk(w.v) + '</span><span>Kina per hour</span><span class="sep">|</span><span>' + w.how + '</span></div>' +
       (next ? '<p class="help">' + sk(w.v - next.v) + ' an hour more than ' + next.route.toLowerCase() + '.</p>' : '') + '</div>' + stats + '</section>';
   }
+  // Your tracked crafting's average time per craft, offered for the minutes per craft.
+  function trackedCraftHint(tC) {
+    let sec = 0, n = 0;
+    for (const c of myCrafts()) if (c.spc > 0) { sec += c.spc * c.x; n += c.x; }
+    if (!n) return '';
+    const min = sec / n / 60;
+    return '<span class="help">Tracked: ' + NF1.format(sec / n) + ' s a craft' + (tC && Math.abs(tC - min) < 0.005 ? '' : ' <button class="linkbtn" data-act="craft-use" data-v="' + min.toFixed(3) + '">Use it</button>') + '</span>';
+  }
   function gatherView() {
     const C = buildCalc(), nodes = gatherCalc(C), tC = myCraftMin();
     const mine = nodes.filter(f => f.runs.length || f.grades.some(g => isGathered(g.it)));
@@ -2036,13 +2089,13 @@
     const rows = (show === 'mine' ? mine : nodes).filter(f => !q || f.grades.some(g => loose(g.it.name).indexOf(q) >= 0))
       .sort((a, b) => (top(b) - top(a)) || (bestNet(b) - bestNet(a)) || a.name.localeCompare(b.name));
     const B = myBudget(), levelsSet = Object.keys(myLevels()).length > 0;
-    let h = liveHTML() + gatherLead(C, nodes, tC);
+    let h = (UI.live.mode !== 'craft' ? liveHTML() : '') + gatherLead(C, nodes, tC);
     h += '<p class="help">Gathering depends on things this page can’t know: how fast nodes respawn, other players taking them, failed extractions, double harvests and tier-ups. So it uses what you actually get. Open a node, then either track it live from a screen share, or gather for a while and log how long it took and how many of each grade you got. Every session adds to the averages. <strong>Expected</strong> uses this node’s extractions per hour, how often its extractions open at each grade (pooled from everyone in the price book, since that roll is the same for everyone), and your own success, tier-up and double rates from every tracked session of the same kind (ore, gems, Odyle, logs), so one lucky or unlucky Pure or Radiant doesn’t swing the hour; <strong>As gathered</strong> uses exactly what you got. <strong>Leave out breaks</strong> drops tracked gaps of over ' + BREAK_S / 60 + ' minutes without an extraction. ' +
       'Figures are Kina per hour of your time, after ' + feesTxt() + '. <strong>Craft the best</strong> crafts the grades worth more crafted and adds your minutes per craft to the hour. Each craft’s other materials are bought, or counted at their sell price if you gather them too. It assumes the market buys everything at today’s price.' +
       (levelsSet ? ' Only crafts your levels allow are counted' + (B ? ', and only ones your ' + compact(B) + ' budget covers.' : '.') : B ? ' Only crafts your ' + compact(B) + ' budget covers are counted.' : ' Set a budget on Rankings to count only crafts you can afford.') +
       (S.uid ? ' Your sessions and minutes per craft are yours alone.' : '') + '</p>';
     h += '<div class="filters"><div class="field"><label for="gq">Find a material</label><input id="gq" class="in" type="search" value="' + esc(UI.gatherQ) + '" data-inp="gq" placeholder="e.g. Odyle, Ore, Sapphire" autocomplete="off"></div>' +
-      '<div class="field narrow"><label for="g-craft">My minutes per craft</label><input id="g-craft" class="in num" inputmode="decimal" value="' + (tC ? esc(NF2.format(tC)) : '') + '" data-chg="g-craft" placeholder="e.g. 2" autocomplete="off"></div>' +
+      '<div class="field narrow"><label for="g-craft">My minutes per craft</label><input id="g-craft" class="in num" inputmode="decimal" value="' + (tC ? esc(NF2.format(tC)) : '') + '" data-chg="g-craft" placeholder="e.g. 2" autocomplete="off">' + trackedCraftHint(tC) + '</div>' +
       '<div class="seg" role="group" aria-label="Which nodes"><button data-act="g-show" data-v="mine" aria-pressed="' + (show === 'mine') + '">I gather</button><button data-act="g-show" data-v="all" aria-pressed="' + (show === 'all') + '">All gathering nodes</button></div>' +
       '<div class="seg" role="group" aria-label="Grades per hour"><button data-act="g-odds" data-v="exp" aria-pressed="' + (UI.gatherOdds !== 'raw') + '" title="Your odds from every tracked session of the same kind of node">Expected</button><button data-act="g-odds" data-v="raw" aria-pressed="' + (UI.gatherOdds === 'raw') + '" title="What your sessions here actually got">As gathered</button></div>' +
       '<label class="check"><input type="checkbox" id="g-breaks" data-chg="g-breaks"' + (UI.gatherNoBreaks ? ' checked' : '') + '> Leave out breaks</label>' +
@@ -2140,19 +2193,20 @@
   // extraction is matched to a kind of node by its item icon, so a route with several kinds of node is
   // saved as one session per node. The clock runs from the moment the screen is shared.
   // States: off, asking (share prompt), calibrate (find the popup), tracking, finishing, review.
-  const LS_BOX = 'kina-ledger:livebox:v1';
+  const LS_BOX = 'kina-ledger:livebox:v1', LS_BOX_CRAFT = 'kina-ledger:livebox-craft:v1';
   const LS_ICONS = 'kina-ledger:itemicons:v1';
   const LIVE_EMPTY = { stream: null, worker: null, ex: [], kinds: [], started: 0, ended: 0, pausedAt: 0, pausedMs: 0, reading: null, snap: null, rough: null, view: null, nodeOf: null, problems: [], count: 0, timer: null, countTimer: null, finTimer: null, save: false };
   const LIVE = Object.assign({}, LIVE_EMPTY);
   function liveSupported() { return !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia && window.MediaStreamTrackProcessor && window.Worker && window.OffscreenCanvas); }
   // Where the popup sits on your screen, as fractions of the shared screen. Kept in this browser.
-  function liveBox() {
+  // The crafting popup sits elsewhere on screen, so it has its own.
+  function liveBox(mode) {
     try {
-      const b = JSON.parse(localStorage.getItem(LS_BOX) || 'null');
+      const b = JSON.parse(localStorage.getItem(mode === 'craft' ? LS_BOX_CRAFT : LS_BOX) || 'null');
       return b && ['x', 'y', 'w', 'h'].every(k => typeof b[k] === 'number' && b[k] >= 0 && b[k] <= 1) ? b : null;
     } catch (_) { return null; }
   }
-  function saveLiveBox(b) { try { localStorage.setItem(LS_BOX, JSON.stringify({ x: b.x, y: b.y, w: b.w, h: b.h })); } catch (_) {} }
+  function saveLiveBox(b, mode) { try { localStorage.setItem(mode === 'craft' ? LS_BOX_CRAFT : LS_BOX, JSON.stringify({ x: b.x, y: b.y, w: b.w, h: b.h })); } catch (_) {} }
   // Item icons you've named, and their node. Kept in this browser.
   function knownIcons() {
     try {
@@ -2229,11 +2283,15 @@
     }
     return kinds;
   }
-  function liveName() { return UI.live.f ? itemName(UI.live.f) : 'gathering'; }
-  async function liveStart(f) {
+  function liveName() {
+    if (UI.live.mode === 'craft') { const r = getRecipe(UI.live.r); return r ? itemName(r.output) : 'crafting'; }
+    return UI.live.f ? itemName(UI.live.f) : 'gathering';
+  }
+  // mode 'craft' tracks crafting of recipe r instead of gathering.
+  async function liveStart(f, mode, r) {
     if (!liveSupported()) { toast('Live tracking needs Edge or Chrome on a computer.'); return; }
     if (UI.live.state !== 'off') return;
-    UI.live = { state: 'asking', f: f || null, found: null, locating: false };
+    UI.live = { state: 'asking', mode: mode === 'craft' ? 'craft' : 'gather', f: f || null, r: r || null, found: null, locating: false };
     render();
     let stream;
     try { stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 10, max: 15 } }, audio: false }); }
@@ -2246,8 +2304,8 @@
     worker.onmessage = e => liveMsg(e.data);
     // "Stop sharing" in the browser's own bar ends the session too.
     track.addEventListener('ended', () => { if (UI.live.state === 'tracking' || UI.live.state === 'calibrate') liveStop(false); });
-    const box = liveBox();
-    worker.postMessage({ type: 'start', readable: processor.readable, box: box, version: BUILD }, [processor.readable]);
+    const box = liveBox(UI.live.mode);
+    worker.postMessage({ type: 'start', readable: processor.readable, box: box, version: BUILD, mode: UI.live.mode }, [processor.readable]);
     if (box) liveTracking(); else { UI.live.state = 'calibrate'; render(); }
   }
   function liveTracking() {
@@ -2267,6 +2325,7 @@
   function readingTxt(r) {
     if (!r) return 'Waiting for the first frame…';
     if (!r.present) return 'No gathering popup on screen right now.';
+    if (UI.live.mode === 'craft') return 'Crafting: Success ' + pct(r.s, 0) + ' · Fail ' + pct(r.f, 0) + (r.blue ? ' · Splendent craft' : '');
     return 'Gathering: Success ' + pct(r.s, 0) + ' · Fail ' + pct(r.f, 0) + ' · ' + (r.grade || 'grade not recognized') + (r.orb ? ' · ×2' : '');
   }
   function liveTick() {
@@ -2287,7 +2346,7 @@
       LIVE.reading = m.r;
       liveTick();
     } else if (m.type === 'extraction') {
-      m.ex.kind = kindFor(m.ex, m.icon).id;
+      if (UI.live.mode !== 'craft') m.ex.kind = kindFor(m.ex, m.icon).id;
       LIVE.ex.push(m.ex);
       if (UI.live.state === 'tracking') scheduleRender();
     } else if (m.type === 'problem') {
@@ -2313,6 +2372,14 @@
     if (UI.live.state !== 'finishing') return;
     clearTimeout(LIVE.finTimer);
     if (LIVE.worker) { LIVE.worker.terminate(); LIVE.worker = null; }
+    if (UI.live.mode === 'craft') {
+      const cs = GatherReader.craftSummary(GatherReader.crafts(LIVE.ex));
+      if (!cs.x && !LIVE.problems.length) { liveReset(); toast('Tracking stopped. No crafting was seen.'); }
+      else if (LIVE.save && cs.x && !LIVE.problems.some(p => !p.sent)) { liveSaveCraft(); liveReset(); }
+      else UI.live.state = 'review';
+      render();
+      return;
+    }
     const kinds = liveKinds();
     if (!kinds.length && !LIVE.problems.length) { liveReset(); toast('Tracking stopped. No gathering was seen.'); }
     else if (LIVE.save && kinds.every(x => x.k.sure && x.k.f) && !LIVE.problems.some(p => !p.sent)) { liveSave(); liveReset(); }
@@ -2388,6 +2455,16 @@
     setRuns(runs);
     toast('Saved ' + saved.join(' and ') + (lost ? '. ' + plural(lost, 'item') + ' of a grade this page didn’t recognize weren’t counted.' : '.'));
   }
+  // Normal items made: a landed combo replaces the normal item unless the recipe gives it on top.
+  function craftNormal(cs, r) { return r && r.comboAdds ? cs.ok : cs.normal; }
+  // Saves tracked crafting as a session on the recipe.
+  function liveSaveCraft() {
+    const cs = GatherReader.craftSummary(GatherReader.crafts(LIVE.ex)), r = getRecipe(UI.live.r);
+    if (!cs.x || !r) { toast('Nothing was saved.'); return; }
+    const min = Math.min(1440, Math.max(0.1, Math.round(liveSecs() / 6) / 10));
+    setCrafts(myCrafts().concat({ r: r.id, t: Date.now(), m: min, x: cs.x, ok: cs.ok, cp: cs.cp, cok: cs.cok, spc: isFinite(cs.perCraft) ? Math.round(cs.perCraft * 10) / 10 : 0, lv: num(myLevels()[r.profession]) || 0 }));
+    toast('Saved ' + plural(cs.x, 'craft') + ' of ' + itemName(r.output) + ': ' + craftNormal(cs, r) + ' normal, ' + cs.splendent + ' Splendent.');
+  }
   function liveReset() {
     clearInterval(LIVE.timer); clearInterval(LIVE.countTimer); clearTimeout(LIVE.finTimer);
     if (LIVE.stream) for (const t of LIVE.stream.getTracks()) t.stop();
@@ -2408,7 +2485,12 @@
     render();
   }
   function liveNotice() {
-    if (UI.live.state === 'off' || UI.tab === 'gather') return '';
+    if (UI.live.state === 'off') return '';
+    if (UI.live.mode === 'craft') {
+      if (UI.tab === 'rank') return '';
+      return '<div class="notice"><span>' + (UI.live.state === 'review' ? 'Your tracked crafting isn’t saved yet.' : 'Tracking crafts of ' + esc(liveName()) + ' live.') + '</span><button class="btn small" data-act="tab" data-tab="rank">Open Rankings</button></div>';
+    }
+    if (UI.tab === 'gather') return '';
     return '<div class="notice"><span>' + (UI.live.state === 'review' ? 'Your tracked gathering isn’t saved yet.' : 'Tracking ' + esc(liveName()) + ' live.') + '</span><button class="btn small" data-act="tab" data-tab="gather">Open Gathering</button></div>';
   }
   function liveHTML() {
@@ -2420,20 +2502,22 @@
     }
     if (st === 'calibrate') {
       const fd = UI.live.found, ok = !!(fd && fd.match >= 0.5 && fd.r && fd.r.present);
-      return '<section class="panel live"><div class="toolbar"><h2 class="sec-h">Show the page where the gathering popup is</h2>' + clock + '</div>' +
-        '<ol class="steps"><li>In the game, start gathering a node so the gathering popup is showing.</li><li>Click <strong>Snapshot in 5 seconds</strong> and switch back to the game.</li>' +
-        '<li>Back here, click the popup on the snapshot to zoom in, then drag a box around it, from “Professional Lv.” down to the Fail bar. It doesn’t need to be exact. This is remembered in this browser.</li></ol>' +
+      const craft = UI.live.mode === 'craft';
+      return '<section class="panel live"><div class="toolbar"><h2 class="sec-h">Show the page where the ' + (craft ? 'crafting' : 'gathering') + ' popup is</h2>' + clock + '</div>' +
+        '<ol class="steps"><li>In the game, ' + (craft ? 'start crafting so the crafting popup is showing.' : 'start gathering a node so the gathering popup is showing.') + '</li><li>Click <strong>Snapshot in 5 seconds</strong> and switch back to the game.</li>' +
+        '<li>Back here, click the popup on the snapshot to zoom in, then drag a box around it, from ' + (craft ? '“Crafting in Progress”' : '“Professional Lv.”') + ' down to the Fail bar. It doesn’t need to be exact. This is remembered in this browser' + (craft ? ', apart from the gathering popup’s place.' : '.') + '</li></ol>' +
         '<div class="row-gap"><button class="btn primary" data-act="live-snap"' + (LIVE.count ? ' disabled' : '') + '>' + (LIVE.count ? 'Snapshot in ' + LIVE.count + '…' : LIVE.snap ? 'New snapshot in 5 seconds' : 'Snapshot in 5 seconds') + '</button>' +
         (LIVE.view ? '<button class="btn" data-act="live-unzoom">Zoom out</button>' : '') +
         '<button class="btn ghost" data-act="live-discard">Cancel</button></div>' +
         (LIVE.snap && !LIVE.view ? '<p class="help">Click the popup to zoom in.</p>' : '') +
-        (LIVE.snap ? '<canvas id="live-snap" class="live-snap" aria-label="Snapshot of your screen. Drag a box around the gathering popup."></canvas>' : '') +
+        (LIVE.snap ? '<canvas id="live-snap" class="live-snap" aria-label="Snapshot of your screen. Drag a box around the popup."></canvas>' : '') +
         (UI.live.locating ? '<p class="help">Looking for the popup…</p>' : '') +
         (fd ? (ok ? '<div class="live-found"><canvas id="live-zoom" class="live-zoom" width="380" height="110" aria-hidden="true"></canvas><div class="live-found-txt"><p><strong>Found it.</strong> ' + esc(readingTxt(fd.r)) + '</p>' +
             '<div class="row-gap"><button class="btn primary" data-act="live-use">Use this and start tracking</button></div></div></div>'
           : '<p class="note loss">Couldn’t find the popup in that box. Check that it shows in the snapshot, then drag again or take a new snapshot.</p>') : '') +
         '<p class="note">The clock started when you shared your screen. Your screen is read in this browser only; nothing is recorded or sent anywhere.</p></section>';
     }
+    if (UI.live.mode === 'craft') return liveCraftHTML(st, name, clock);
     const kinds = liveKinds(), sum = GatherReader.summarize({ extractions: LIVE.ex, nodes: [] }, liveSecs()), paused = !!LIVE.pausedAt;
     const naming = st === 'review' && kinds.some(x => !x.k.sure || !x.k.f);
     const stat = (l, v) => '<div class="stat"><dt>' + l + '</dt><dd>' + v + '</dd></div>';
@@ -2479,6 +2563,31 @@
         '<div class="row-gap"><button class="btn primary' + (UI.confirm === 'live-save' ? ' armed' : '') + '" data-act="live-save"' + (ready ? '' : ' disabled') + '>' + (UI.confirm === 'live-save' && unsent ? 'Click again to save without sending' : 'Save') + '</button>' +
         '<button class="btn ghost danger' + (UI.confirm === 'live-discard' ? ' armed' : '') + '" data-act="live-discard">' + (UI.confirm === 'live-discard' ? 'Click again to discard' : 'Discard') + '</button>' +
         (ready ? '' : '<span class="help">Choose a node for each icon first.</span>') + '</div>';
+    }
+    return h + '</section>';
+  }
+  // Live crafting: each craft of a batch counts on its own, and a combo's Splendent craft counts with the
+  // craft it came from.
+  function liveCraftHTML(st, name, clock) {
+    const items = GatherReader.crafts(LIVE.ex), cs = GatherReader.craftSummary(items), paused = !!LIVE.pausedAt;
+    const stat = (l, v) => '<div class="stat"><dt>' + l + '</dt><dd>' + v + '</dd></div>';
+    const recent = items.slice(-5).reverse().map(c => '<li>' + (c.result === 'success' ? 'Success' + (c.combo === 'success' ? ' · combo → <strong>Splendent</strong>' : c.combo === 'fail' ? ' · combo failed, kept the normal one' : '')
+      : c.result === 'fail' ? '<span class="loss">Failed</span>' : 'Stopped early') + '</li>').join('');
+    let h = '<section class="panel live"><div class="toolbar"><h2 class="sec-h">' + (st === 'review' ? 'Sharing stopped. Save these crafts?' : st === 'finishing' ? 'Finishing…' : (paused ? 'Paused: ' : 'Tracking crafts of ') + name) + '</h2>' + clock + '</div>' +
+      (st === 'tracking' ? '<p class="live-status" id="live-status">' + esc(readingTxt(LIVE.reading)) + '</p>' : '') +
+      '<dl class="statrow">' + stat('Crafts', NF0.format(cs.x)) + stat('Succeeded', cs.x ? pct(cs.ok / cs.x, 0) : '—') + stat('Combos', cs.ok ? cs.cp + ' (' + pct(cs.cp / cs.ok, 0) + ')' : '—') +
+      stat('Combo landed', cs.cp ? cs.cok + ' of ' + cs.cp : '—') + stat('Per craft', isFinite(cs.perCraft) ? NF1.format(cs.perCraft) + ' s' : '—') + stat('Made', craftNormal(cs, getRecipe(UI.live.r)) + ' normal · ' + cs.splendent + ' Splendent') + '</dl>' +
+      (recent ? '<div><span class="lbl">Latest</span><ul class="live-recent">' + recent + '</ul></div>' : '');
+    if (st === 'tracking') {
+      h += '<div class="row-gap"><button class="btn primary" data-act="live-stop">Stop and save</button><button class="btn" data-act="live-pause">' + (paused ? 'Resume' : 'Pause') + '</button>' +
+        '<button class="btn ghost" data-act="live-recal">Find the popup again</button><button class="btn ghost" data-act="live-report">Report a problem</button>' +
+        '<button class="btn ghost danger' + (UI.confirm === 'live-discard' ? ' armed' : '') + '" data-act="live-discard">' + (UI.confirm === 'live-discard' ? 'Click again to discard' : 'Discard') + '</button></div>' +
+        (LIVE.problems.length ? '<p class="help">' + plural(LIVE.problems.length, 'odd moment') + ' saved as pictures of the popup. You can send them when you stop.</p>' : '') +
+        '<p class="note">Crafts in a batch each count on their own, and a combo’s Splendent craft counts with the craft it came from. Only crafts of ' + name + ' are counted, so stop before crafting something else.</p>';
+    } else if (st === 'review') {
+      const unsent = S.mode === 'db' && LIVE.problems.some(p => p.send && !p.sent);
+      h += problemsHTML() + '<div class="row-gap"><button class="btn primary' + (UI.confirm === 'live-save' ? ' armed' : '') + '" data-act="live-save"' + (cs.x ? '' : ' disabled') + '>' + (UI.confirm === 'live-save' && unsent ? 'Click again to save without sending' : 'Save') + '</button>' +
+        '<button class="btn ghost danger' + (UI.confirm === 'live-discard' ? ' armed' : '') + '" data-act="live-discard">' + (UI.confirm === 'live-discard' ? 'Click again to discard' : 'Discard') + '</button></div>';
     }
     return h + '</section>';
   }
@@ -2826,6 +2935,8 @@
       if (f && !have.some(x => x.f === f && x.t === r.t)) runs.push(Object.assign({ f: f, m: r.m, n: n, t: r.t }, r.st ? { st: r.st } : {}));
     }
     if (runs.length) setRuns(have.concat(runs));
+    const hadCrafts = myCrafts(), crafts = readCrafts(d.myCrafts).filter(c => getRecipe(c.r) && !hadCrafts.some(x => x.r === c.r && x.t === c.t));
+    if (crafts.length) setCrafts(hadCrafts.concat(crafts));
     if (num(d.myCraftMin) > 0) setCraftMin(num(d.myCraftMin));
     return 'Imported' + plural(ni, 'new item') + ' and ' + plural(nr, 'recipe') + '.';
   }
@@ -2854,12 +2965,15 @@
       render();
     },
     'live-start': t => liveStart(t.dataset.f),
+    'live-craft': t => liveStart(null, 'craft', t.dataset.r),
+    'craft-del': t => { const ts = +t.dataset.t; setCrafts(myCrafts().filter(c => !(c.r === t.dataset.r && c.t === ts))); toast('Deleted that crafting session.'); render(); },
+    'craft-use': t => { setCraftMin(Math.round(+t.dataset.v * 100) / 100); render(); },
     'live-snap': () => liveSnapSoon(),
     'live-unzoom': () => { LIVE.view = null; LIVE.rough = null; render(); },
     'live-use': () => {
       const fd = UI.live.found;
       if (!fd || !fd.box || !LIVE.worker) return;
-      saveLiveBox(fd.box);
+      saveLiveBox(fd.box, UI.live.mode);
       LIVE.worker.postMessage({ type: 'box', box: fd.box });
       liveTracking();
     },
@@ -2877,6 +2991,10 @@
     },
     'live-stop': () => liveStop(true),
     'live-save': () => {
+      if (UI.live.mode === 'craft') {
+        if (S.mode === 'db' && LIVE.problems.some(p => p.send && !p.sent) && !arm('live-save')) return;
+        liveSaveCraft(); liveReset(); render(); return;
+      }
       if (!liveKinds().every(x => x.k.f)) { toast('Choose a node for each icon first.'); return; }
       if (S.mode === 'db' && LIVE.problems.some(p => p.send && !p.sent) && !arm('live-save')) return;
       liveSave(); liveReset(); render();
@@ -2987,7 +3105,7 @@
     'paste-clear': () => { UI.shots.pasteText = ''; UI.shots.pasteNote = ''; if (UI.shots.source === 'paste') UI.shots.market = null; render(); },
     'shot-discard': () => { UI.shots.market = null; UI.shots.error = ''; render(); },
     'shot-apply': () => applyMarket(),
-    'io-export': () => { UI.io.exportText = JSON.stringify({ app: 'kina-ledger', version: 3, exportedAt: new Date().toISOString(), settings: S.settings, myLevels: myLevels(), myGather: S.uid ? [...myGather()] : null, myRuns: myRuns(), myCraftMin: myCraftMin(), items: [...S.items.values()], recipes: [...S.recipes.values()] }, null, 2); render(); },
+    'io-export': () => { UI.io.exportText = JSON.stringify({ app: 'kina-ledger', version: 3, exportedAt: new Date().toISOString(), settings: S.settings, myLevels: myLevels(), myGather: S.uid ? [...myGather()] : null, myRuns: myRuns(), myCrafts: myCrafts(), myCraftMin: myCraftMin(), items: [...S.items.values()], recipes: [...S.recipes.values()] }, null, 2); render(); },
     'io-hide': () => { UI.io.exportText = ''; render(); },
     'io-copy': () => {
       const fallback = () => { const ta = document.getElementById('io-out'); if (ta) { ta.focus(); ta.select(); } toast('Press Ctrl+C to copy the selected text.'); };
@@ -3159,7 +3277,7 @@
   function useLocal() {
     for (const stop of unsubs) stop();
     unsubs = [];
-    DB = null; S.mode = 'local'; S.role = 'owner'; S.uid = null; S.mine = null; S.myGather = null; S.myRuns = null; S.myCraftMin = null; S.pool = new Map(); poolSent = '';
+    DB = null; S.mode = 'local'; S.role = 'owner'; S.uid = null; S.mine = null; S.myGather = null; S.myRuns = null; S.myCrafts = null; S.myCraftMin = null; S.pool = new Map(); poolSent = '';
     S.items = new Map(); S.recipes = new Map(); S.settings = mergeSettings(null);
     loadLocal();
     itemsVer++; recipesVer++;
@@ -3177,7 +3295,7 @@
     for (const stop of unsubs) stop();
     unsubs = [];
     S.auth = 'member'; S.role = member.role === 'owner' ? 'owner' : 'member';
-    DB = fs; S.mode = 'db'; S.uid = user.uid; S.mine = null; S.myGather = null; S.myRuns = null; S.myCraftMin = null; S.pool = new Map(); poolSent = ''; S.ready = false;
+    DB = fs; S.mode = 'db'; S.uid = user.uid; S.mine = null; S.myGather = null; S.myRuns = null; S.myCrafts = null; S.myCraftMin = null; S.pool = new Map(); poolSent = ''; S.ready = false;
     S.items = new Map(); S.recipes = new Map();
     render();
     subscribe();
@@ -3190,6 +3308,7 @@
       S.mine = readLevels(x && x.levels);
       S.myGather = x && Array.isArray(x.gather) ? new Set(x.gather.filter(v => typeof v === 'string')) : null;
       S.myRuns = readRuns(x && x.runs);
+      S.myCrafts = readCrafts(x && x.crafts);
       writePool();
       S.myCraftMin = x && num(x.craftMin) > 0 ? num(x.craftMin) : null;
       itemsVer++;

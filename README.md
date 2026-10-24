@@ -7,6 +7,7 @@ A crafting profit calculator for AION 2 (Global), made for a small group of frie
 - Splendent combo procs, with the cost of chasing one and whether to sell it or craft the next tier with it.
 - A shared price book with price history. Price lists can be pasted straight from a market site.
 - What an hour of gathering is worth, from logged or live-tracked sessions. Live tracking reads the gathering popup from a screen share, in the browser only.
+- Your real crafting rates per recipe, live-tracked the same way from the crafting popup: success, combo procs and Splendent crafts landed, and time per craft.
 
 The shared price book is invite-only.
 

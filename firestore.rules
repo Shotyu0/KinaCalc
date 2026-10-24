@@ -63,16 +63,17 @@ service cloud.firestore {
       allow write: if isOwner();
     }
 
-    // Each member's own crafting levels, the items they gather, their gathering sessions and their
-    // minutes per craft, private to them.
+    // Each member's own crafting levels, the items they gather, their gathering and crafting
+    // sessions and their minutes per craft, private to them.
     match /users/{uid} {
       allow read: if isMember() && request.auth.uid == uid;
       allow write: if isMember() && request.auth.uid == uid
-        && request.resource.data.keys().hasOnly(['levels', 'gather', 'runs', 'craftMin'])
+        && request.resource.data.keys().hasOnly(['levels', 'gather', 'runs', 'crafts', 'craftMin'])
         && request.resource.data.levels is map
         && request.resource.data.levels.size() <= 20
         && (!('gather' in request.resource.data) || (request.resource.data.gather is list && request.resource.data.gather.size() <= 2000))
         && (!('runs' in request.resource.data) || (request.resource.data.runs is list && request.resource.data.runs.size() <= 300))
+        && (!('crafts' in request.resource.data) || (request.resource.data.crafts is list && request.resource.data.crafts.size() <= 300))
         && (!('craftMin' in request.resource.data) || (request.resource.data.craftMin is number && request.resource.data.craftMin > 0 && request.resource.data.craftMin <= 10000));
     }
 

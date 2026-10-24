@@ -1,5 +1,5 @@
-// Live gathering tracker. Reads screen-share frames in the background, so tracking keeps going while
-// the game covers the page. Messages in: start { readable, box, version }, box { box }, snapshot,
+// Live gathering and crafting tracker. Reads screen-share frames in the background, so tracking keeps going
+// while the game covers the page. Messages in: start { readable, box, version, mode }, box { box }, snapshot,
 // locate { rough }, pause { on }, report. Messages out: snapshot { bitmap, w, h }, located { box, match,
 // reading }, reading { r }, extraction { ex, icon }, problem { reasons, ex, sheet }, ended.
 'use strict';
@@ -8,7 +8,8 @@ const R = self.GatherReader, W = R.REF_W, H = R.REF_H;
 // Known item icons, to name the item and its grade. Tracking works without them, from the title color.
 fetch('data/gather-icons.json').then(r => r.ok ? r.json() : null).then(d => { if (d) R.useIcons(d); }).catch(() => {});
 const cv = new OffscreenCanvas(W, H), ctx = cv.getContext('2d', { willReadFrequently: true });
-let box = null, tr = null, paused = false, wantSnap = false, snap = null, lastPost = 0, lastT = 0, itemPx = null, version = '';
+// mode 'craft' reads the crafting popup: no item icons, and combos to confirm.
+let box = null, tr = null, paused = false, wantSnap = false, snap = null, lastPost = 0, lastT = 0, itemPx = null, version = '', mode = 'gather', runs = [];
 
 // Problem reports. The last 20 seconds of the popup box are kept as small JPEGs; an odd extraction, or
 // the player's own report, turns its frames into one picture. Only the popup box is kept, never the rest
@@ -16,7 +17,7 @@ let box = null, tr = null, paused = false, wantSnap = false, snap = null, lastPo
 const KEEP = 20, MAX_FRAMES = 32, recent = [], perReason = {};
 let problems = 0;
 function keepFrame(t, r) {
-  const info = r.present ? { s: r.s, f: r.f, grade: r.grade, orb: r.orb, x2: r.x2, item: r.item ? R.iconName(r.item.i) + (r.item.sure ? '' : '?') : null } : null;
+  const info = r.present ? { s: r.s, f: r.f, grade: r.grade, orb: r.orb, x2: r.x2, blue: r.blue, item: r.item ? R.iconName(r.item.i) + (r.item.sure ? '' : '?') : null } : null;
   cv.convertToBlob({ type: 'image/jpeg', quality: 0.85 }).then(blob => {
     recent.push({ t: t, blob: blob, info: info });
     while (recent.length && recent[0].t < lastT - KEEP) recent.shift();
@@ -36,7 +37,7 @@ async function sheet(frames, lines) {
     try { const bmp = await createImageBitmap(f.blob); g.drawImage(bmp, x, y); bmp.close(); } catch (_) {}
     const n = f.info;
     g.fillStyle = '#c8cbd2'; g.font = '12px sans-serif';
-    g.fillText((f.t - t0).toFixed(1) + 's  ' + (n ? 'S ' + pct(n.s) + ' F ' + pct(n.f) + ' ' + (n.grade || 'grade?') + ' ' + (n.item || 'item?') + (n.orb ? ' orb' : '') + (n.x2 ? ' x2' : '') : 'no popup'), x + 4, y + H + 13);
+    g.fillText((f.t - t0).toFixed(1) + 's  ' + (n ? 'S ' + pct(n.s) + ' F ' + pct(n.f) + ' ' + (n.grade || 'grade?') + (mode === 'craft' ? (n.blue ? ' blue' : '') : ' ' + (n.item || 'item?') + (n.orb ? ' orb' : '') + (n.x2 ? ' x2' : '')) : 'no popup'), x + 4, y + H + 13);
   }
   return c.convertToBlob({ type: 'image/jpeg', quality: 0.72 });
 }
@@ -49,7 +50,7 @@ function framesBetween(from, to) {
 function summary(ex) {
   if (!ex) return null;
   const o = {};
-  for (const k of ['result', 'openGrade', 'grade', 'qty', 'tierUp', 'titleColor', 'x2', 'orb']) if (ex[k] != null) o[k] = ex[k];
+  for (const k of mode === 'craft' ? ['result', 'openGrade', 'blue', 'closedBy'] : ['result', 'openGrade', 'grade', 'qty', 'tierUp', 'titleColor', 'x2', 'orb']) if (ex[k] != null) o[k] = ex[k];
   if (ex.item) o.item = ex.item[0]; else if (ex.material) o.material = ex.material[0];
   o.seconds = +(ex.end - ex.start).toFixed(1);
   return o;
@@ -63,7 +64,7 @@ function problem(reasons, from, ex) {
   // Wait a moment so the frames just after it are kept too.
   setTimeout(async () => {
     const frames = framesBetween(from, lastT), s = summary(ex);
-    const lines = ['Kina Ledger gathering tracker · ' + version + ' · ' + reasons.join(', '),
+    const lines = ['Kina Ledger ' + (mode === 'craft' ? 'crafting' : 'gathering') + ' tracker · ' + version + ' · ' + reasons.join(', '),
       s ? 'Read as: ' + JSON.stringify(s) : 'Reported by the player: the last ' + Math.round(lastT - from) + ' seconds',
       'Box ' + (box ? [box.x, box.y, box.w, box.h].map(v => v.toFixed(4)).join(', ') : 'none') + ' · ' + frames.length + ' frames, ' + (frames.length ? (frames[frames.length - 1].t - frames[0].t).toFixed(1) : 0) + ' s'];
     try { postMessage({ type: 'problem', reasons: reasons, ex: s, sheet: await sheet(frames, lines) }); } catch (_) {}
@@ -71,17 +72,28 @@ function problem(reasons, from, ex) {
 }
 
 // Each finished extraction goes out with a picture of its item icon, taken while it was still Common.
+// Crafting has no icon; its combo crafts are kept as pictures to confirm, like gathering's tier-ups.
 function newTracker() {
-  tr = R.tracker({ onDone: ex => {
-    postMessage({ type: 'extraction', ex: ex, icon: itemPx });
-    if (ex.odd && ex.odd.length) problem(ex.odd, ex.start - 1, ex);
+  runs = [];
+  tr = R.tracker({ mode: mode, onDone: ex => {
+    postMessage({ type: 'extraction', ex: ex, icon: mode === 'craft' ? null : itemPx });
+    const odd = (ex.odd || []).slice();
+    let from = ex.start;
+    if (mode === 'craft') {
+      // A run that joins the craft before it is that craft's combo.
+      const before = R.crafts(runs).length, list = R.crafts(runs.concat(ex));
+      runs.push(ex);
+      if (list.length === before) { odd.push('combo craft'); from = list[list.length - 1].start; }
+      else if (ex.blue) odd.push('blue panel without a combo');
+    }
+    if (odd.length) problem(odd, from - 1, ex);
   } });
 }
 // Reads the popup box (fractions of the frame) from a frame or bitmap.
 function readBox(src, w, h, b) {
   ctx.drawImage(src, b.x * w, b.y * h, b.w * w, b.h * h, 0, 0, W, H);
-  const r = R.read({ w: W, h: H, ch: 4, data: ctx.getImageData(0, 0, W, H).data });
-  if (r.present && r.grade === 'Common') {
+  const r = R.read({ w: W, h: H, ch: 4, data: ctx.getImageData(0, 0, W, H).data }, { items: mode !== 'craft' });
+  if (mode !== 'craft' && r.present && r.grade === 'Common') {
     const [x0, y0, x1, y1] = R.ITEM_BOX;
     const img = ctx.getImageData(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
     itemPx = { w: img.width, h: img.height, data: img.data };
@@ -107,7 +119,7 @@ async function pump(readable) {
         lastT = t;
         keepFrame(t, r);
         tr.feed(t, r);
-        if (t - lastPost >= 0.5) { lastPost = t; postMessage({ type: 'reading', r: { present: r.present, s: r.s, f: r.f, grade: r.grade, orb: r.orb } }); }
+        if (t - lastPost >= 0.5) { lastPost = t; postMessage({ type: 'reading', r: { present: r.present, s: r.s, f: r.f, grade: r.grade, orb: r.orb, blue: r.blue } }); }
       }
     } finally { frame.close(); }
   }
@@ -124,14 +136,14 @@ function locate(rough) {
   const area = new OffscreenCanvas(x1 - x0, y1 - y0), actx = area.getContext('2d', { willReadFrequently: true });
   actx.drawImage(snap, x0, y0, x1 - x0, y1 - y0, 0, 0, x1 - x0, y1 - y0);
   const f = { w: x1 - x0, h: y1 - y0, ch: 4, data: actx.getImageData(0, 0, x1 - x0, y1 - y0).data };
-  const b = R.locate(f, { x: rough.x - x0, y: rough.y - y0, w: rough.w, h: rough.h });
+  const b = R.locate(f, { x: rough.x - x0, y: rough.y - y0, w: rough.w, h: rough.h }, mode);
   const frac = { x: (b.x + x0) / snap.width, y: (b.y + y0) / snap.height, w: b.w / snap.width, h: b.h / snap.height };
   const r = readBox(snap, snap.width, snap.height, frac);
-  postMessage({ type: 'located', box: frac, match: b.match, reading: { present: r.present, s: r.s, f: r.f, grade: r.grade, orb: r.orb } });
+  postMessage({ type: 'located', box: frac, match: b.match, reading: { present: r.present, s: r.s, f: r.f, grade: r.grade, orb: r.orb, blue: r.blue } });
 }
 onmessage = e => {
   const m = e.data;
-  if (m.type === 'start') { box = m.box || null; version = m.version || ''; newTracker(); pump(m.readable); }
+  if (m.type === 'start') { box = m.box || null; version = m.version || ''; mode = m.mode === 'craft' ? 'craft' : 'gather'; newTracker(); pump(m.readable); }
   else if (m.type === 'box') { box = m.box; newTracker(); }
   else if (m.type === 'snapshot') wantSnap = true;
   else if (m.type === 'locate') locate(m.rough);
