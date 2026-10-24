@@ -69,7 +69,7 @@
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
   let GATHERABLE = null; // names of materials gathered from nodes, from data/gather-icons.json
-  const BUILD = '2026-10-24d'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-10-24e'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -2195,7 +2195,8 @@
   // States: off, asking (share prompt), calibrate (find the popup), tracking, finishing, review.
   const LS_BOX = 'kina-ledger:livebox:v1', LS_BOX_CRAFT = 'kina-ledger:livebox-craft:v1';
   const LS_ICONS = 'kina-ledger:itemicons:v1';
-  const LIVE_EMPTY = { stream: null, worker: null, ex: [], kinds: [], started: 0, ended: 0, pausedAt: 0, pausedMs: 0, reading: null, snap: null, rough: null, view: null, nodeOf: null, problems: [], count: 0, timer: null, countTimer: null, finTimer: null, save: false };
+  const LIVE_EMPTY = { stream: null, worker: null, ex: [], kinds: [], started: 0, ended: 0, pausedAt: 0, pausedMs: 0, reading: null, snap: null, rough: null, view: null, nodeOf: null, problems: [], count: 0, timer: null, countTimer: null, finTimer: null, save: false,
+    firstSeen: 0, firstPaused: 0, fromFirst: false, lastFrameAt: 0, lastPresentAt: 0, trackingSince: 0, size: null, perf: null, limit: 0 };
   const LIVE = Object.assign({}, LIVE_EMPTY);
   function liveSupported() { return !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia && window.MediaStreamTrackProcessor && window.Worker && window.OffscreenCanvas); }
   // Where the popup sits on your screen, as fractions of the shared screen. Kept in this browser.
@@ -2206,7 +2207,16 @@
       return b && ['x', 'y', 'w', 'h'].every(k => typeof b[k] === 'number' && b[k] >= 0 && b[k] <= 1) ? b : null;
     } catch (_) { return null; }
   }
-  function saveLiveBox(b, mode) { try { localStorage.setItem(mode === 'craft' ? LS_BOX_CRAFT : LS_BOX, JSON.stringify({ x: b.x, y: b.y, w: b.w, h: b.h })); } catch (_) {} }
+  function saveLiveBox(b, mode) {
+    const o = { x: b.x, y: b.y, w: b.w, h: b.h };
+    if (b.fw > 0 && b.fh > 0) { o.fw = b.fw; o.fh = b.fh; }
+    try { localStorage.setItem(mode === 'craft' ? LS_BOX_CRAFT : LS_BOX, JSON.stringify(o)); } catch (_) {}
+  }
+  // The gathering timer: minutes of gathering after which tracking stops and saves itself. Remembered in
+  // this browser; 0 for none.
+  const LS_LIMIT = 'kina-ledger:livelimit:v1';
+  function liveLimit() { try { const v = Math.round(+localStorage.getItem(LS_LIMIT)); return v >= 1 && v <= 600 ? v : 0; } catch (_) { return 0; } }
+  function saveLiveLimit(v) { try { if (v) localStorage.setItem(LS_LIMIT, String(v)); else localStorage.removeItem(LS_LIMIT); } catch (_) {} }
   // Item icons you've named, and their node. Kept in this browser.
   function knownIcons() {
     try {
@@ -2303,12 +2313,12 @@
     UI.live = { state: 'asking', mode: mode === 'craft' ? 'craft' : 'gather', f: f || null, r: r || null, found: null, locating: false };
     render();
     let stream;
-    try { stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 10, max: 15 } }, audio: false }); }
+    try { stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 8, max: 8 } }, audio: false, selfBrowserSurface: 'exclude' }); }
     catch (_) { liveReset(); toast('Screen sharing was cancelled, so tracking didn’t start.'); render(); return; }
     if (UI.live.state !== 'asking') { for (const t of stream.getTracks()) t.stop(); return; }
     const track = stream.getVideoTracks()[0], worker = new Worker('gather-worker.js');
     const processor = new MediaStreamTrackProcessor({ track: track });
-    Object.assign(LIVE, LIVE_EMPTY, { stream: stream, worker: worker, ex: [], kinds: [], problems: [], started: Date.now() });
+    Object.assign(LIVE, LIVE_EMPTY, { stream: stream, worker: worker, ex: [], kinds: [], problems: [], started: Date.now(), limit: UI.live.mode === 'gather' ? liveLimit() : 0 });
     LIVE.timer = setInterval(liveTick, 1000);
     worker.onmessage = e => liveMsg(e.data);
     // "Stop sharing" in the browser's own bar ends the session too.
@@ -2319,7 +2329,53 @@
   }
   function liveTracking() {
     UI.live.state = 'tracking';
+    LIVE.trackingSince = Date.now();
     render();
+  }
+  // With a timer, the session runs from the first gather, so setting up doesn't count.
+  function liveTimerFrom() {
+    if (!LIVE.limit || !LIVE.firstSeen || LIVE.fromFirst) return;
+    LIVE.fromFirst = true; LIVE.started = LIVE.firstSeen; LIVE.pausedMs -= LIVE.firstPaused;
+  }
+  function liveLeft() { return LIVE.limit && LIVE.firstSeen ? LIVE.limit * 60 - liveSecs() : Infinity; }
+  function liveClockTxt() {
+    if (UI.live.mode === 'gather' && LIVE.limit && UI.live.state === 'tracking') return clockTxt(LIVE.firstSeen ? liveSecs() : 0) + ' / ' + clockTxt(LIVE.limit * 60);
+    return clockTxt(liveSecs());
+  }
+  // What the status line says: the reading, unless the picture has stopped or the popup's been missing.
+  function liveStatusTxt() {
+    const now = Date.now();
+    if (UI.live.state === 'tracking' && !LIVE.pausedAt) {
+      if (LIVE.lastFrameAt && now - LIVE.lastFrameAt > 8000) return 'The shared picture stopped updating. If you shared the game’s window, it may be minimized, or the game may not allow window sharing: stop, and share the entire screen instead.';
+      const since = LIVE.lastPresentAt || LIVE.trackingSince;
+      if (LIVE.lastFrameAt && since && now - since > 120000) return 'No popup for ' + Math.floor((now - since) / 60000) + ' minutes. If the game window moved, use Find the popup again.';
+      if (LIVE.limit && !LIVE.firstSeen) return 'Your ' + LIVE.limit + '-minute timer starts at your first gather.';
+    }
+    return readingTxt(LIVE.reading);
+  }
+  function perfTxt() {
+    const p = LIVE.perf;
+    return p && p.fps > 0 ? 'Reading the popup takes ' + NF1.format(p.ms) + ' ms a frame at ' + Math.round(p.fps) + ' frames a second: about ' + Math.max(1, Math.round(p.fps * p.ms / 10)) + '% of one processor core.' : '';
+  }
+  // A short two-note chime when the timer ends, since you're likely in the game.
+  function chime() {
+    try {
+      const A = window.AudioContext || window.webkitAudioContext;
+      if (!A) return;
+      const ctx = new A(), now = ctx.currentTime;
+      [660, 880].forEach((hz, i) => {
+        const o = ctx.createOscillator(), g = ctx.createGain(), t = now + i * 0.25;
+        o.frequency.value = hz; o.connect(g); g.connect(ctx.destination);
+        g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.2, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.4);
+        o.start(t); o.stop(t + 0.45);
+      });
+      setTimeout(() => ctx.close(), 1500);
+    } catch (_) {}
+  }
+  function liveTimeUp() {
+    chime();
+    toast('Time’s up: ' + plural(LIVE.limit, 'minute') + ' of gathering.');
+    liveStop(true);
   }
   // Seconds since the screen was shared, leaving out pauses.
   function liveSecs() {
@@ -2338,9 +2394,11 @@
     return 'Gathering: Success ' + pct(r.s, 0) + ' · Fail ' + pct(r.f, 0) + ' · ' + (r.grade || 'grade not recognized') + (r.orb ? ' · ×2' : '');
   }
   function liveTick() {
-    const t = document.getElementById('live-elapsed'), s = document.getElementById('live-status');
-    if (t) t.textContent = clockTxt(liveSecs());
-    if (s) s.textContent = readingTxt(LIVE.reading);
+    const t = document.getElementById('live-elapsed'), s = document.getElementById('live-status'), p = document.getElementById('live-perf');
+    if (t) t.textContent = liveClockTxt();
+    if (s) s.textContent = liveStatusTxt();
+    if (p) p.textContent = perfTxt();
+    if (UI.live.state === 'tracking' && !LIVE.pausedAt && liveLeft() <= 0) liveTimeUp();
   }
   function liveMsg(m) {
     if (m.type === 'snapshot') {
@@ -2352,8 +2410,23 @@
       UI.live.found = m.box ? { box: m.box, match: m.match, r: m.reading } : null;
       render();
     } else if (m.type === 'reading') {
-      LIVE.reading = m.r;
+      LIVE.reading = m.r; LIVE.perf = m.perf || LIVE.perf; LIVE.lastFrameAt = Date.now();
+      if (m.r.present && UI.live.state === 'tracking') {
+        LIVE.lastPresentAt = Date.now();
+        if (!LIVE.firstSeen) { LIVE.firstSeen = Date.now(); LIVE.firstPaused = LIVE.pausedMs; liveTimerFrom(); }
+      }
       liveTick();
+    } else if (m.type === 'size') {
+      // A box found on a different size of picture (a window shared instead of the screen) is in the wrong
+      // place, so find the popup again.
+      LIVE.size = { w: m.w, h: m.h };
+      const b = liveBox(UI.live.mode);
+      if (UI.live.state === 'tracking' && LIVE.worker && b && b.fw && (Math.abs(b.fw - m.w) > 2 || Math.abs(b.fh - m.h) > 2)) {
+        LIVE.worker.postMessage({ type: 'box', box: null });
+        UI.live.state = 'calibrate'; UI.live.found = null;
+        toast('What you shared is a different size from last time (a window instead of the whole screen?), so find the popup once more.');
+        render();
+      }
     } else if (m.type === 'extraction') {
       if (UI.live.mode !== 'craft') m.ex.kind = kindFor(m.ex, m.icon).id;
       LIVE.ex.push(m.ex);
@@ -2503,10 +2576,10 @@
     return '<div class="notice"><span>' + (UI.live.state === 'review' ? 'Your tracked gathering isn’t saved yet.' : 'Tracking ' + esc(liveName()) + ' live.') + '</span><button class="btn small" data-act="tab" data-tab="gather">Open Gathering</button></div>';
   }
   function liveHTML() {
-    const st = UI.live.state, name = esc(liveName()), clock = '<span class="live-time" id="live-elapsed">' + clockTxt(liveSecs()) + '</span>';
+    const st = UI.live.state, name = esc(liveName()), clock = '<span class="live-time" id="live-elapsed">' + liveClockTxt() + '</span>';
     if (st === 'off') return '';
     if (st === 'asking') {
-      return '<section class="panel live"><h2 class="sec-h">Track ' + name + ' live</h2><p class="help">In your browser’s sharing window, choose <strong>Entire screen</strong> and pick the screen the game is on. Sharing just the game window can show a frozen or black picture.</p>' +
+      return '<section class="panel live"><h2 class="sec-h">Track ' + name + ' live</h2><p class="help">In your browser’s sharing window, choose <strong>Window</strong> and pick the game, so only the game is shared and nothing else on your screen is seen. If the snapshot comes out black or the picture freezes, stop and choose <strong>Entire screen</strong> instead. Either way it’s read in this browser only.</p>' +
         '<div class="row-gap"><button class="btn ghost" data-act="live-discard">Cancel</button></div></section>';
     }
     if (st === 'calibrate') {
@@ -2524,7 +2597,7 @@
         (fd ? (ok ? '<div class="live-found"><canvas id="live-zoom" class="live-zoom" width="380" height="110" aria-hidden="true"></canvas><div class="live-found-txt"><p><strong>Found it.</strong> ' + esc(readingTxt(fd.r)) + '</p>' +
             '<div class="row-gap"><button class="btn primary" data-act="live-use">Use this and start tracking</button></div></div></div>'
           : '<p class="note loss">Couldn’t find the popup in that box. Check that it shows in the snapshot, then drag again or take a new snapshot.</p>') : '') +
-        '<p class="note">The clock started when you shared your screen. Your screen is read in this browser only; nothing is recorded or sent anywhere.</p></section>';
+        '<p class="note">' + (LIVE.limit ? 'Your ' + LIVE.limit + '-minute timer starts at your first gather.' : 'The clock started when you shared your screen.') + ' What you share is read in this browser only; nothing is recorded or sent anywhere.</p></section>';
     }
     if (UI.live.mode === 'craft') return liveCraftHTML(st, name, clock);
     const kinds = liveKinds(), sum = GatherReader.summarize({ extractions: LIVE.ex, nodes: [] }, liveSecs()), paused = !!LIVE.pausedAt;
@@ -2542,7 +2615,7 @@
     const upTotal = liveSecs(), up = LIVE.ex.length && upTotal > 0 ? Object.assign({ total: upTotal }, timeSplit(LIVE.ex, upTotal, () => 1).get(1)) : null;
     const title = st === 'review' ? (naming ? 'Which node was each?' : 'Sharing stopped. Save this session?') : st === 'finishing' ? 'Finishing…' : (paused ? 'Paused: ' : 'Tracking ') + (kinds.length > 1 ? 'a mixed route' : name);
     let h = '<section class="panel live"><div class="toolbar"><h2 class="sec-h">' + title + '</h2>' + clock + '</div>' +
-      (st === 'tracking' ? '<p class="live-status" id="live-status">' + esc(readingTxt(LIVE.reading)) + '</p>' : '') +
+      (st === 'tracking' ? '<p class="live-status" id="live-status">' + esc(liveStatusTxt()) + '</p><p class="help" id="live-perf">' + esc(perfTxt()) + '</p>' : '') +
       '<dl class="statrow">' + stat('Extractions', NF0.format(sum.x)) + stat('Succeeded', sum.x ? pct(sum.ok / sum.x, 0) : '—') + stat('Doubled', sum.ok ? pct(sum.d / sum.ok, 0) : '—') +
       stat('Tiered up', sum.ok ? pct(sum.u / sum.ok, 0) : '—') + stat('Per extraction', sum.x ? NF1.format(sum.sec / sum.x) + ' s' : '—') +
       stat('Active', up ? pct(up.act / up.total, 0) : '—') + stat('Items', items(sum)) + '</dl>' +
@@ -2565,6 +2638,8 @@
         '<button class="btn ghost" data-act="live-recal">Find the popup again</button><button class="btn ghost" data-act="live-report">Report a problem</button>' +
         '<button class="btn ghost danger' + (UI.confirm === 'live-discard' ? ' armed' : '') + '" data-act="live-discard">' + (UI.confirm === 'live-discard' ? 'Click again to discard' : 'Discard') + '</button></div>' +
         (LIVE.problems.length ? '<p class="help">' + plural(LIVE.problems.length, 'odd moment') + ' saved as pictures of the popup. You can send them when you stop.</p>' : '') +
+        '<div class="live-limit"><label for="live-limit">Stop after</label><input id="live-limit" class="in num" inputmode="numeric" maxlength="3" value="' + (LIVE.limit || '') + '" placeholder="—" data-chg="live-limit" aria-describedby="live-limit-help"><span>minutes of gathering</span></div>' +
+        '<p class="help" id="live-limit-help">The timer starts at your first gather. When it ends, tracking stops and saves by itself, with a chime. It’s remembered in this browser; leave it empty to stop yourself.</p>' +
         '<p class="note">Switch to the game whenever you like: tracking keeps going in the background, and closing this tab stops it. Gathering more than one kind of node? Each is told apart by its item icon and saved to its own node. If something reads wrong, <strong>Report a problem</strong> keeps a picture of the last 15 seconds of the popup.</p>';
     } else if (st === 'review') {
       const ready = kinds.every(x => x.k.f), unsent = S.mode === 'db' && LIVE.problems.some(p => p.send && !p.sent);
@@ -2583,7 +2658,7 @@
     const recent = items.slice(-5).reverse().map(c => '<li>' + (c.result === 'success' ? 'Success' + (c.combo === 'success' ? ' · combo → <strong>Splendent</strong>' : c.combo === 'fail' ? ' · combo failed, kept the normal one' : '')
       : c.result === 'fail' ? '<span class="loss">Failed</span>' : 'Stopped early') + '</li>').join('');
     let h = '<section class="panel live"><div class="toolbar"><h2 class="sec-h">' + (st === 'review' ? 'Sharing stopped. Save these crafts?' : st === 'finishing' ? 'Finishing…' : (paused ? 'Paused: ' : 'Tracking crafts of ') + name) + '</h2>' + clock + '</div>' +
-      (st === 'tracking' ? '<p class="live-status" id="live-status">' + esc(readingTxt(LIVE.reading)) + '</p>' : '') +
+      (st === 'tracking' ? '<p class="live-status" id="live-status">' + esc(liveStatusTxt()) + '</p><p class="help" id="live-perf">' + esc(perfTxt()) + '</p>' : '') +
       '<dl class="statrow">' + stat('Crafts', NF0.format(cs.x)) + stat('Succeeded', cs.x ? pct(cs.ok / cs.x, 0) : '—') + stat('Combos', cs.ok ? cs.cp + ' (' + pct(cs.cp / cs.ok, 0) + ')' : '—') +
       stat('Combo landed', cs.cp ? cs.cok + ' of ' + cs.cp : '—') + stat('Per craft', isFinite(cs.perCraft) ? NF1.format(cs.perCraft) + ' s' : '—') + stat('Made', craftNormal(cs, getRecipe(UI.live.r)) + ' normal · ' + cs.splendent + ' Splendent') + '</dl>' +
       (recent ? '<div><span class="lbl">Latest</span><ul class="live-recent">' + recent + '</ul></div>' : '');
@@ -3073,7 +3148,7 @@
     'live-use': () => {
       const fd = UI.live.found;
       if (!fd || !fd.box || !LIVE.worker) return;
-      saveLiveBox(fd.box, UI.live.mode);
+      saveLiveBox(Object.assign({}, fd.box, LIVE.snap ? { fw: LIVE.snap.w, fh: LIVE.snap.h } : {}), UI.live.mode);
       LIVE.worker.postMessage({ type: 'box', box: fd.box });
       liveTracking();
     },
@@ -3254,6 +3329,13 @@
     'g-breaks': t => { UI.gatherNoBreaks = t.checked; saveUI(); later(); },
     'gather-node': t => { setGather(t.dataset.ids.split(' '), t.checked); later(); },
     'live-kind': t => { const k = LIVE.kinds[+t.dataset.k]; if (k) { k.f = t.value || null; k.sure = !!t.value; k.picked = true; } later(); },
+    'live-limit': t => {
+      const v = Math.round(num(t.value) || 0);
+      LIVE.limit = v >= 1 && v <= 600 ? v : 0;
+      saveLiveLimit(LIVE.limit);
+      t.value = LIVE.limit || '';
+      liveTimerFrom(); liveTick();
+    },
     'live-prob': t => { const p = LIVE.problems[+t.dataset.i]; if (p) p.send = t.checked; },
     'reports-del-after': t => { UI.reportsDel = t.checked; },
     'g-craft': t => {

@@ -94,9 +94,11 @@
   // Two item icons closer than this (average difference per color channel, 0-255) are the same item.
   // The same icon reads within about 1 between frames; Fine and Common Orichalcum Ore differ by about 30.
   const ICON_SAME = 14;
-  // Title colors, used when the item icon doesn't settle it. Common is plain white and Fine is measured;
-  // Pure and Radiant are the wiki's grade colors until seen in the popup.
-  const TITLE = [['Fine', [40, 190, 98]], ['Pure', [66, 169, 223]], ['Radiant', [242, 181, 42]]];
+  // Title colors, used when the item icon doesn't settle it. Common is plain white; Fine and Radiant (a pale
+  // gold, not the wiki's deeper one) are measured from popups, Pure is the wiki's grade color. Each also
+  // needs its hue, so greyish edges of white text don't count toward a color.
+  const TITLE = [['Fine', [40, 190, 98], c => c[1] > c[0] + 30 && c[1] > c[2] + 20], ['Pure', [66, 169, 223], c => c[2] > c[0] + 40],
+    ['Radiant', [212, 196, 124], c => c[0] > c[2] + 45 && c[1] > c[2] + 30]];
 
   function reader(f) {
     const ch = f.ch || 4, sx = f.w / REF_W, sy = f.h / REF_H;
@@ -111,17 +113,19 @@
   // Success fill: blue while filling, white or lilac when it jumps, cyan when complete.
   const sFill = c => (c[2] > 200 && c[1] > 120 && c[0] < 140) || (c[1] > 200 && c[2] > 200) || (c[0] > 150 && c[2] > 180 && c[1] > 140);
   const sDone = c => c[1] > 220 && c[2] > 220 && c[0] < 170;
-  // Fail fill: orange while filling, yellow when complete.
-  const fFill = c => c[0] > 170 && c[1] > 70 && c[1] < 140 && c[2] < 60;
+  // Fail fill: orange while filling, yellow when complete. The orange is brighter on some screens
+  // (230/141/14 against 204/103/0), so it's told by red well above green.
+  const fFill = c => c[0] > 170 && c[1] > 70 && c[1] < 175 && c[2] < 70 && c[0] - c[1] > 50;
   const fDone = c => c[0] > 190 && c[1] > 190 && c[2] < 130;
-  // How far a bar has filled, 0..1, reading right from its label until the fill stops.
-  function bar(px, row, isFill) {
+  // How far a bar has filled, 0..1, reading right from its label until the fill stops. clean is the share
+  // of the row that looks like a bar at all: fill, its finished color, or the dark track.
+  function bar(px, row, isFill, isDone) {
     let filled = 0, ok = 0, n = 0;
     for (let x = L.scanX0; x <= L.barX1 - 2; x += 2) {
       const c = px(x, row);
       n++;
       if (isFill(c)) { ok++; if (filled === x - 2 || (filled === 0 && x === L.scanX0)) filled = x; }
-      else if (dark(c)) ok++;
+      else if (isDone(c) || dark(c)) ok++;
     }
     return { frac: filled ? Math.min(1, (filled - L.barX0) / (L.barX1 - L.barX0)) : 0, clean: ok / n };
   }
@@ -142,7 +146,7 @@
       if (hi > 140) { r += c[0]; g += c[1]; b += c[2]; k++; }
       if (lo > 165 && hi - lo < 40) { votes.Common++; continue; }
       let best = null, bd = VOTE_NEAR;
-      for (const [name, ref] of TITLE) { const d = Math.hypot(c[0] - ref[0], c[1] - ref[1], c[2] - ref[2]); if (d < bd) { bd = d; best = name; } }
+      for (const [name, ref, hue] of TITLE) { const d = Math.hypot(c[0] - ref[0], c[1] - ref[1], c[2] - ref[2]); if (d < bd && hue(c)) { bd = d; best = name; } }
       if (best) votes[best]++;
     }
     let name = null;
@@ -183,12 +187,15 @@
   // opts.items false skips naming the item from its icon (crafting has no icons to match).
   function read(f, opts) {
     const px = reader(f), white = c => Math.min(c[0], c[1], c[2]) > 190, green = c => c[1] > 120 && c[1] > c[0] + 35 && c[1] > c[2] + 25;
-    const s = bar(px, L.sRow, sFill), fl = bar(px, L.fRow, fFill);
+    const s = bar(px, L.sRow, sFill, sDone), fl = bar(px, L.fRow, fFill, fDone);
     if (!(count(px, L.sLabel, white) >= 6 && count(px, L.fLabel, white) >= 3 && s.clean > 0.8 && fl.clean > 0.8)) return { present: false };
     const g = grade(px), span = (L.barX1 - L.scanX0) * 2;
     const luck = count(px, L.luck, white) >= 30 && count(px, L.luck, c => c[2] > 90 && c[2] > c[0] + 40 && !white(c)) >= 60;
     const m = opts && opts.items === false ? null : matchItem(px, g.name), x2At = (box, ok) => ok && count(px, box, c => Math.min(c[0], c[1], c[2]) > 150) >= 8;
-    const orbLo = count(px, L.icon, green) >= 25, orbHi = count(px, L.iconHi, green) >= 25;
+    // The green icons fill 100 or more pixels; plants seen through a Fine panel can reach about 30.
+    // The upper slot is above the panel, where plants behind it show through, so a stacked icon there
+    // counts only with one below it and when it's as solid as one (they give 170 or more).
+    const orbLo = count(px, L.icon, green) >= 60, orbHi = orbLo && count(px, L.iconHi, green) >= 150;
     return {
       present: true, s: s.frac, f: fl.frac, grade: g.name, gradeRgb: g.rgb, icon: itemIcon(px), item: m && !m.near ? m : null, near: !!(m && m.near), blue: panelBlue(px),
       orb: orbLo || orbHi,
@@ -234,7 +241,7 @@
       cur.closedBy = how;
       cur.blue = cur.blues * 2 > cur.seen.length;
       cur.luck = cur.lucks >= 2;
-      delete cur.blues; delete cur.lucks; delete cur.nears;
+      delete cur.blues; delete cur.lucks; delete cur.nears; delete cur.settled;
       cur.end = cur.result ? cur.resultAt : t;
       if (!cur.result) cur.result = 'interrupted';
       const before = cur.result === 'interrupted' ? cur.seen : cur.seen.filter(s => s.t < cur.resultAt);
@@ -291,8 +298,9 @@
     function feed(t, r) {
       if (!r.present) { if (cur && t - lastSeen > opts.lost) close(lastSeen, 'gone'); return; }
       lastSeen = t;
-      // Empty bars after a result: the next extraction at the same node has started.
-      if (cur && cur.result && r.s < 0.25 && r.f < 0.25 && !r.sDone && !r.fDone) close(t, 'reset');
+      // Empty bars after a result: the next extraction at the same node has started. Empty means none of
+      // either bar shows past its label, so one misread frame of a full bar doesn't end it.
+      if (cur && cur.result && r.s < 0.1 && r.f < 0.1 && !r.sDone && !r.fDone) close(t, 'reset');
       if (!cur) cur = { start: t, firstGrade: r.grade, seen: [], iconCommon: [], iconOther: [], x2: 0, orb: false, blues: 0, lucks: 0, nears: 0, result: null, resultAt: null };
       if (!cur.firstGrade && r.grade) cur.firstGrade = r.grade;
       cur.seen.push({ t: t, g: r.grade, item: r.item ? r.item.i : null, sure: !!(r.item && r.item.sure) });
@@ -302,8 +310,13 @@
       if (!r.grade && r.gradeRgb) cur.oddRgb = r.gradeRgb;
       const icons = r.grade === 'Common' ? cur.iconCommon : cur.iconOther;
       if (r.icon && icons.length < 40) icons.push(r.icon);
-      if (!cur.result && (r.sDone || r.s >= opts.full)) { cur.result = 'success'; cur.resultAt = t; }
-      else if (!cur.result && (r.fDone || r.f >= opts.full)) { cur.result = 'fail'; cur.resultAt = t; }
+      // A bar in its finished color (cyan or yellow) settles the result. One that's nearly full only
+      // suggests it: a Success bar can wait at 98% for seconds while Fail keeps filling.
+      if (r.sDone || r.fDone) {
+        const res = r.sDone ? 'success' : 'fail';
+        if (!cur.settled) { if (cur.result !== res) { cur.result = res; cur.resultAt = t; } cur.settled = true; }
+      } else if (!cur.result && r.s >= opts.full) { cur.result = 'success'; cur.resultAt = t; }
+      else if (!cur.result && r.f >= opts.full) { cur.result = 'fail'; cur.resultAt = t; }
       // A double needs the green orb and its x2 together: Ore Appraiser's icon is green without the x2,
       // and the edge of a Fine panel can read as white without any green.
       if (cur.result === 'success') {

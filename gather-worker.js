@@ -10,6 +10,8 @@ fetch('data/gather-icons.json').then(r => r.ok ? r.json() : null).then(d => { if
 const cv = new OffscreenCanvas(W, H), ctx = cv.getContext('2d', { willReadFrequently: true });
 // mode 'craft' reads the crafting popup: no item icons, and combos to confirm.
 let box = null, tr = null, paused = false, wantSnap = false, snap = null, lastPost = 0, lastT = 0, itemPx = null, version = '', mode = 'gather', runs = [];
+// What reading costs, measured over 5-second windows: frames read a second and milliseconds each.
+let perfWin = { at: 0, frames: 0, work: 0 }, perf = null, lastKept = -1, lastRead = -1, sizeW = 0, sizeH = 0;
 
 // Problem reports. The last 20 seconds of the popup box are kept as small JPEGs; an odd extraction, or
 // the player's own report, turns its frames into one picture. Only the popup box is kept, never the rest
@@ -107,6 +109,7 @@ async function pump(readable) {
     if (got.done) break;
     const frame = got.value, w = frame.displayWidth, h = frame.displayHeight;
     try {
+      if (w !== sizeW || h !== sizeH) { sizeW = w; sizeH = h; postMessage({ type: 'size', w: w, h: h }); }
       if (wantSnap) {
         wantSnap = false;
         if (snap) snap.close();
@@ -114,12 +117,20 @@ async function pump(readable) {
         const copy = await createImageBitmap(snap);
         postMessage({ type: 'snapshot', bitmap: copy, w: w, h: h }, [copy]);
       }
-      if (box && tr && !paused) {
-        const t = frame.timestamp / 1e6, r = readBox(frame, w, h, box);
+      // At most 10 frames a second, whatever the browser sends: getting a frame's pixels off the graphics
+      // card is nearly all the cost, and the tracker reads as well at 5.
+      if (box && tr && !paused && frame.timestamp / 1e6 - lastRead >= 0.095) {
+        const t0 = performance.now(), t = frame.timestamp / 1e6, r = readBox(frame, w, h, box);
+        lastRead = t;
         lastT = t;
-        keepFrame(t, r);
+        // Pictures for problem reports: five a second is plenty, since a report shows 32 frames at most.
+        if (t - lastKept >= 0.2) { lastKept = t; keepFrame(t, r); }
         tr.feed(t, r);
-        if (t - lastPost >= 0.5) { lastPost = t; postMessage({ type: 'reading', r: { present: r.present, s: r.s, f: r.f, grade: r.grade, orb: r.orb, blue: r.blue } }); }
+        const now = performance.now();
+        perfWin.frames++; perfWin.work += now - t0;
+        if (!perfWin.at) perfWin.at = now;
+        else if (now - perfWin.at >= 5000) { perf = { fps: perfWin.frames * 1000 / (now - perfWin.at), ms: perfWin.work / perfWin.frames }; perfWin = { at: now, frames: 0, work: 0 }; }
+        if (t - lastPost >= 0.5) { lastPost = t; postMessage({ type: 'reading', r: { present: r.present, s: r.s, f: r.f, grade: r.grade, orb: r.orb, blue: r.blue }, perf: perf }); }
       }
     } finally { frame.close(); }
   }
@@ -147,6 +158,6 @@ onmessage = e => {
   else if (m.type === 'box') { box = m.box; newTracker(); }
   else if (m.type === 'snapshot') wantSnap = true;
   else if (m.type === 'locate') locate(m.rough);
-  else if (m.type === 'pause') paused = !!m.on;
+  else if (m.type === 'pause') { paused = !!m.on; perfWin = { at: 0, frames: 0, work: 0 }; }
   else if (m.type === 'report') problem(['reported by the player'], lastT - 15, null);
 };
