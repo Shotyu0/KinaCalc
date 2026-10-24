@@ -69,7 +69,7 @@
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
   let GATHERABLE = null; // names of materials gathered from nodes, from data/gather-icons.json
-  const BUILD = '2026-10-24c'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-10-24d'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -2262,6 +2262,15 @@
     if (node) {
       let k = LIVE.kinds.find(x => x.auto && x.f === node);
       if (!k) { k = { id: LIVE.kinds.length, icon: ex.icon, icons: [], img: null, f: node, sure: true, picked: true, auto: true }; LIVE.kinds.push(k); }
+      // Earlier extractions of the same icon that couldn't be named (Aria and Azpha look alike until
+      // Fresh) join it.
+      if (ex.icon) for (const o of LIVE.kinds) {
+        if (o === k || o.f || o.picked || !o.icons.some(ic => GatherReader.iconDist(ic, ex.icon) < GatherReader.ICON_SAME)) continue;
+        for (const e of LIVE.ex) if (e.kind === o.id) e.kind = k.id;
+        for (const ic of o.icons) if (k.icons.length < 8) k.icons.push(ic);
+        if (!k.img) k.img = o.img;
+        o.icons = [];
+      }
       return keep(k);
     }
     let k = ex.icon ? LIVE.kinds.find(x => x.icons.some(ic => GatherReader.iconDist(ic, ex.icon) < GatherReader.ICON_SAME)) : LIVE.kinds[LIVE.kinds.length - 1];
@@ -2596,7 +2605,7 @@
     const list = LIVE.problems, shared = S.mode === 'db';
     if (!list.length) return '';
     return '<div class="probs"><span class="lbl">Problem pictures</span><p class="help">' + plural(list.length, 'picture') + ' of the popup from moments worth a second look. Each shows the frames and what the tracker read on them. ' +
-      (shared ? 'Sending them to the owner helps fix the tracker.' : 'Download them and send them to the owner to help fix the tracker.') + ' Only the popup box is in them, nothing else from your screen.</p><ul class="prob-list">' +
+      (shared ? 'Sending them to the owner helps fix the tracker.' : 'Download them and send them to the owner to help fix the tracker.') + ' Only the popup’s part of your screen is in them, so if another window covered the game there, it shows too.</p><ul class="prob-list">' +
       list.map((p, i) => '<li><label class="check"><input type="checkbox" data-chg="live-prob" data-i="' + i + '"' + (p.send ? ' checked' : '') + (p.sent || p.sending || !shared ? ' disabled' : '') + '> ' + esc(p.reasons.join(', ')) + '</label>' +
         (p.sent ? ' <span class="tag gather">Sent</span>' : p.sending ? ' <span class="help">Sending…</span>' : '') +
         (p.url ? '<details><summary>Show the picture</summary><img class="prob-img" src="' + esc(p.url) + '" alt="Popup frames for: ' + esc(p.reasons.join(', ')) + '"></details><a class="btn small" href="' + esc(p.url) + '" download="kina-tracker-' + (i + 1) + '.jpg">Download</a>'

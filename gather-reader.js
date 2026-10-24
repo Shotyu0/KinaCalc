@@ -10,6 +10,9 @@
     sLabel: [64, 72, 110, 80], fLabel: [64, 89, 86, 97],
     // x2 stops short of the Fine panel's bright right edge, and below the (i) icon's stem.
     title: [18, 45, 230, 59], icon: [344, 40, 376, 66], x2: [360, 57, 373, 67],
+    // When two procs show at once (Plentiful Harvest and Ore Appraiser), their icons stack: the second
+    // sits 26 pixels higher, and either one can be the x2 orb.
+    iconHi: [344, 14, 376, 40], x2Hi: [360, 31, 373, 41],
     // Lady Luck's badge (a proc that raises the success chance) takes the orb's spot: a blue strip with
     // white text from about x 312, whose "ck" falls in the x2 box. This is the "Lady" part.
     luck: [318, 49, 342, 61],
@@ -25,6 +28,7 @@
   // Icons on Pure panels read 13 to 14 from their own art, so up to MATCH_TITLE counts when the title's
   // color gives the same grade.
   const MATCH_TITLE = 15;
+  const NEAR = { near: true };
   function useIcons(data) {
     if (!data || !Array.isArray(data.icons) || data.size !== 8) return;
     ICONS = data.icons.map(i => ({
@@ -82,7 +86,9 @@
       if (v < other) other = v;
       if (ICONS[n].family !== ICONS[best.i].family && v < otherFamily) otherFamily = v;
     });
-    if (otherFamily - best.d < MATCH_GAP) return null;
+    // Two materials' icons alike (Aria and Azpha differ only in tint, which the game's lighting shifts):
+    // known to be one of them, but not which.
+    if (otherFamily - best.d < MATCH_GAP) return best.d <= MATCH_MAX ? NEAR : null;
     return { i: best.i, d: best.d, sure: other - best.d >= MATCH_GAP };
   }
   // Two item icons closer than this (average difference per color channel, 0-255) are the same item.
@@ -124,22 +130,24 @@
     for (let y = box[1]; y <= box[3]; y++) for (let x = box[0]; x <= box[2]; x++) if (test(px(x, y))) k++;
     return k;
   }
-  // The title's text color and the grade it matches; null when it matches none.
+  // The title's grade: each pixel votes for the grade color it's close to (white for Common), and the
+  // most votes win. Averaging the bright pixels instead let a see-through panel over bright ground pull
+  // a Fine title toward Pure. rgb is the bright pixels' average, to report a color that matched none.
+  const VOTE_NEAR = 55;
   function grade(px) {
+    const votes = { Common: 0, Fine: 0, Pure: 0, Radiant: 0 };
     let r = 0, g = 0, b = 0, k = 0;
     for (let y = L.title[1]; y <= L.title[3]; y++) for (let x = L.title[0]; x <= L.title[2]; x++) {
-      const c = px(x, y);
-      if (Math.max(c[0], c[1], c[2]) > 140) { r += c[0]; g += c[1]; b += c[2]; k++; }
+      const c = px(x, y), hi = Math.max(c[0], c[1], c[2]), lo = Math.min(c[0], c[1], c[2]);
+      if (hi > 140) { r += c[0]; g += c[1]; b += c[2]; k++; }
+      if (lo > 165 && hi - lo < 40) { votes.Common++; continue; }
+      let best = null, bd = VOTE_NEAR;
+      for (const [name, ref] of TITLE) { const d = Math.hypot(c[0] - ref[0], c[1] - ref[1], c[2] - ref[2]); if (d < bd) { bd = d; best = name; } }
+      if (best) votes[best]++;
     }
-    if (k < 12) return { name: null, rgb: null };
-    const c = [r / k, g / k, b / k];
-    if (Math.max(c[0], c[1], c[2]) - Math.min(c[0], c[1], c[2]) < 45) return { name: 'Common', rgb: c };
-    let best = null, bd = Infinity;
-    for (const [name, ref] of TITLE) {
-      const d = Math.hypot(c[0] - ref[0], c[1] - ref[1], c[2] - ref[2]);
-      if (d < bd) { bd = d; best = name; }
-    }
-    return { name: bd < 120 ? best : null, rgb: c };
+    let name = null;
+    for (const n in votes) if (votes[n] >= 12 && (!name || votes[n] > votes[name])) name = n;
+    return { name: name, rgb: k >= 12 ? [r / k, g / k, b / k] : null };
   }
   // The item icon as 4x4 cells of average color: 48 numbers.
   function itemIcon(px) {
@@ -174,17 +182,19 @@
   }
   // opts.items false skips naming the item from its icon (crafting has no icons to match).
   function read(f, opts) {
-    const px = reader(f), white = c => Math.min(c[0], c[1], c[2]) > 190;
+    const px = reader(f), white = c => Math.min(c[0], c[1], c[2]) > 190, green = c => c[1] > 120 && c[1] > c[0] + 35 && c[1] > c[2] + 25;
     const s = bar(px, L.sRow, sFill), fl = bar(px, L.fRow, fFill);
     if (!(count(px, L.sLabel, white) >= 6 && count(px, L.fLabel, white) >= 3 && s.clean > 0.8 && fl.clean > 0.8)) return { present: false };
     const g = grade(px), span = (L.barX1 - L.scanX0) * 2;
     const luck = count(px, L.luck, white) >= 30 && count(px, L.luck, c => c[2] > 90 && c[2] > c[0] + 40 && !white(c)) >= 60;
+    const m = opts && opts.items === false ? null : matchItem(px, g.name), x2At = (box, ok) => ok && count(px, box, c => Math.min(c[0], c[1], c[2]) > 150) >= 8;
+    const orbLo = count(px, L.icon, green) >= 25, orbHi = count(px, L.iconHi, green) >= 25;
     return {
-      present: true, s: s.frac, f: fl.frac, grade: g.name, gradeRgb: g.rgb, icon: itemIcon(px), item: opts && opts.items === false ? null : matchItem(px, g.name), blue: panelBlue(px),
-      orb: count(px, L.icon, c => c[1] > 120 && c[1] > c[0] + 35 && c[1] > c[2] + 25) >= 25,
-      // The white "x2" on the Plentiful Harvest orb. The Ore Appraiser icon shows in the same spot without
-      // it, and Lady Luck's text runs through it.
-      luck: luck, x2: !luck && count(px, L.x2, c => Math.min(c[0], c[1], c[2]) > 150) >= 8,
+      present: true, s: s.frac, f: fl.frac, grade: g.name, gradeRgb: g.rgb, icon: itemIcon(px), item: m && !m.near ? m : null, near: !!(m && m.near), blue: panelBlue(px),
+      orb: orbLo || orbHi,
+      // The white "x2" on the Plentiful Harvest orb, in whichever slot has a green icon. The Ore Appraiser
+      // icon shows in the same spot without it, and Lady Luck's text runs through the lower one.
+      luck: luck, x2: x2At(L.x2, orbLo && !luck) || x2At(L.x2Hi, orbHi),
       sDone: count(px, [L.scanX0, L.sRow - 2, L.barX1 - 4, L.sRow + 2], sDone) > span,
       fDone: count(px, [L.scanX0, L.fRow - 2, L.barX1 - 4, L.fRow + 2], fDone) > span
     };
@@ -224,7 +234,7 @@
       cur.closedBy = how;
       cur.blue = cur.blues * 2 > cur.seen.length;
       cur.luck = cur.lucks >= 2;
-      delete cur.blues; delete cur.lucks;
+      delete cur.blues; delete cur.lucks; delete cur.nears;
       cur.end = cur.result ? cur.resultAt : t;
       if (!cur.result) cur.result = 'interrupted';
       const before = cur.result === 'interrupted' ? cur.seen : cur.seen.filter(s => s.t < cur.resultAt);
@@ -256,7 +266,8 @@
       cur.odd = [];
       if (opts.mode === 'craft') { if (cur.result === 'interrupted') cur.odd.push('popup closed before a result'); }
       else {
-        if (ICONS && !cur.material) cur.odd.push('item not recognized');
+        // Not when its icon was one of two look-alikes: the page names it from the node.
+        if (ICONS && !cur.material && cur.nears * 2 < cur.seen.length) cur.odd.push('item not recognized');
         if (!cur.openGrade || (cur.result === 'success' && !cur.grade)) cur.odd.push('grade not recognized');
         if (cur.result === 'interrupted') cur.odd.push('popup closed before a result');
         if (cur.orb && cur.qty < 2 && !cur.tierUp) cur.odd.push('green icon without x2');
@@ -282,11 +293,12 @@
       lastSeen = t;
       // Empty bars after a result: the next extraction at the same node has started.
       if (cur && cur.result && r.s < 0.25 && r.f < 0.25 && !r.sDone && !r.fDone) close(t, 'reset');
-      if (!cur) cur = { start: t, firstGrade: r.grade, seen: [], iconCommon: [], iconOther: [], x2: 0, orb: false, blues: 0, lucks: 0, result: null, resultAt: null };
+      if (!cur) cur = { start: t, firstGrade: r.grade, seen: [], iconCommon: [], iconOther: [], x2: 0, orb: false, blues: 0, lucks: 0, nears: 0, result: null, resultAt: null };
       if (!cur.firstGrade && r.grade) cur.firstGrade = r.grade;
       cur.seen.push({ t: t, g: r.grade, item: r.item ? r.item.i : null, sure: !!(r.item && r.item.sure) });
       if (r.blue) cur.blues++;
       if (r.luck) cur.lucks++;
+      if (r.near) cur.nears++;
       if (!r.grade && r.gradeRgb) cur.oddRgb = r.gradeRgb;
       const icons = r.grade === 'Common' ? cur.iconCommon : cur.iconOther;
       if (r.icon && icons.length < 40) icons.push(r.icon);
