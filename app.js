@@ -69,7 +69,7 @@
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
   let GATHERABLE = null; // names of materials gathered from nodes, from data/gather-icons.json
-  const BUILD = '2026-10-24b'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-10-24c'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -2682,10 +2682,101 @@
     render();
   }
   const JPEG_URL = /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/;
+  // Saving every report into a folder at once (Edge and Chrome): each picture, and beside it a text file
+  // with who sent it, when, the build, their note and what the tracker read. The folder is remembered in
+  // this browser, and reports already in it are skipped.
+  const canSaveFolder = () => typeof window.showDirectoryPicker === 'function';
+  function folderStore(op, val) {
+    return new Promise((res, rej) => {
+      const rq = indexedDB.open('kina-ledger', 1);
+      rq.onupgradeneeded = () => rq.result.createObjectStore('kv');
+      rq.onerror = () => rej(rq.error);
+      rq.onsuccess = () => {
+        const st = rq.result.transaction('kv', op === 'get' ? 'readonly' : 'readwrite').objectStore('kv');
+        const r = op === 'get' ? st.get('reportsDir') : op === 'del' ? st.delete('reportsDir') : st.put(val, 'reportsDir');
+        r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+      };
+    });
+  }
+  let folderAsked = false;
+  function reportsFolderName() {
+    if (folderAsked || !canSaveFolder()) return;
+    folderAsked = true;
+    folderStore('get').then(d => { if (d && d.name && !(UI.reportsSave && UI.reportsSave.folder)) { UI.reportsSave = Object.assign({}, UI.reportsSave, { folder: d.name }); scheduleRender(); } }, () => {});
+  }
+  function reportName(id, x) {
+    const d = new Date(num(x.at) || 0), p = n => String(n).padStart(2, '0');
+    const what = String(x.reasons || 'report').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+    return 'kina-report-' + d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + '_' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds()) + '-' + what + '-' + String(id).replace(/[^A-Za-z0-9]/g, '').slice(-6);
+  }
+  function reportText(id, x) {
+    let ex = x.ex;
+    try { ex = JSON.stringify(JSON.parse(x.ex), null, 2); } catch (_) {}
+    return ['Kina Ledger problem report', 'Sent: ' + (num(x.at) ? new Date(num(x.at)).toString() : 'unknown'), 'By: ' + String(x.by || ''), 'Build: ' + String(x.version || ''),
+      'Reasons: ' + String(x.reasons || ''), 'Note: ' + (x.note ? String(x.note) : '(none)'), 'Read as: ' + (ex && ex !== '{}' ? String(ex) : '(nothing: the player reported it)'), 'Report id: ' + id, ''].join('\n');
+  }
+  async function writeFile(dir, name, data) {
+    const w = await (await dir.getFileHandle(name, { create: true })).createWritable();
+    await w.write(data); await w.close();
+  }
+  function jpegBytes(url) {
+    const bin = atob(url.slice(url.indexOf(',') + 1)), out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  // pick: choose a folder even when one is remembered.
+  async function saveReports(pick) {
+    if (!DB || S.role !== 'owner' || !canSaveFolder() || (UI.reportsSave && UI.reportsSave.busy)) return;
+    let dir = null;
+    if (!pick) try { dir = await folderStore('get'); } catch (_) {}
+    try {
+      if (dir && (await dir.requestPermission({ mode: 'readwrite' })) !== 'granted') dir = null;
+      if (!dir) { dir = await window.showDirectoryPicker({ id: 'kina-reports', mode: 'readwrite' }); try { await folderStore('put', dir); } catch (_) {} }
+    } catch (e) {
+      if (!(e && e.name === 'AbortError')) { UI.reportsSave = { err: 'Couldn’t open that folder. Choose it again.' }; render(); }
+      return;
+    }
+    const del = !!UI.reportsDel;
+    UI.reportsSave = { busy: true, folder: dir.name };
+    render();
+    let docs;
+    try { docs = (await DB.collection('reports').orderBy('at', 'desc').limit(300).get()).docs; }
+    catch (_) { UI.reportsSave = { folder: dir.name, err: 'Couldn’t load reports. Make sure Firestore is using the latest firestore.rules.' }; render(); return; }
+    let saved = 0, had = 0, failed = 0, removed = 0;
+    const deleted = [];
+    for (const d of docs) {
+      const x = d.data(), base = reportName(d.id, x);
+      // The text file is written last, so it being there means the report was saved whole.
+      let there = false;
+      try { await dir.getFileHandle(base + '.txt'); there = true; } catch (_) {}
+      if (there) had++;
+      else {
+        try {
+          if (typeof x.sheet === 'string' && JPEG_URL.test(x.sheet)) await writeFile(dir, base + '.jpg', jpegBytes(x.sheet));
+          await writeFile(dir, base + '.txt', reportText(d.id, x));
+          saved++;
+        } catch (_) { failed++; continue; }
+      }
+      if (del) try { await DB.doc('reports/' + d.id).delete(); removed++; deleted.push(d.id); } catch (_) {}
+    }
+    if (UI.reports && UI.reports.list) UI.reports.list = UI.reports.list.filter(r => !deleted.includes(r.id));
+    const parts = [saved ? 'Saved ' + plural(saved, 'report') + ' to ' + dir.name + '.' : 'Nothing new to save' + (docs.length ? '.' : ': there are no reports.'),
+      had ? (had === 1 ? 'One was' : had + ' were') + ' already there.' : '', removed ? 'Deleted ' + removed + ' from the database.' : ''].filter(Boolean);
+    UI.reportsSave = { folder: dir.name, msg: parts.join(' '), err: failed ? (failed === 1 ? 'One report' : failed + ' reports') + ' couldn’t be written to the folder' + (del ? ', so ' + (failed === 1 ? 'it was' : 'they were') + ' kept in the database' : '') + '.' : '' };
+    render();
+  }
   function reportsHTML() {
     if (S.mode !== 'db' || S.role !== 'owner') return '';
     const r = UI.reports;
-    let h = '<section class="panel"><h2 class="sec-h">Tracker problem reports</h2><p class="help">Pictures of the gathering or crafting popup that members sent from live tracking, with what the tracker read on each frame. Download one to share it when fixing the tracker.</p>';
+    let h = '<section class="panel"><h2 class="sec-h">Tracker problem reports</h2><p class="help">Pictures of the gathering or crafting popup that members sent from live tracking, with what the tracker read on each frame. Save them to a folder to share them when fixing the tracker.</p>';
+    reportsFolderName();
+    const sv = UI.reportsSave || {};
+    h += canSaveFolder()
+      ? '<div class="row-gap"><button class="btn primary" data-act="reports-save"' + (sv.busy ? ' disabled' : '') + '>' + (sv.busy ? 'Saving…' : sv.folder ? 'Save all to ' + esc(sv.folder) : 'Save all to a folder…') + '</button>' +
+        (sv.folder && !sv.busy ? '<button class="btn ghost" data-act="reports-save" data-pick="1">Choose another folder</button>' : '') + '</div>' +
+        '<label class="check"><input type="checkbox" data-chg="reports-del-after"' + (UI.reportsDel ? ' checked' : '') + (sv.busy ? ' disabled' : '') + '> Delete each report from the database once it’s saved</label>' +
+        (sv.msg ? '<p class="help" role="status">' + esc(sv.msg) + '</p>' : '') + (sv.err ? '<p class="note loss">' + esc(sv.err) + '</p>' : '')
+      : '<p class="help">Saving them all at once needs Edge or Chrome on a computer. You can still download them one at a time.</p>';
     if (!r) return h + '<div class="row-gap"><button class="btn" data-act="reports-load">Show reports</button></div></section>';
     if (r.loading) return h + '<p class="help">Loading…</p></section>';
     if (r.err) h += '<p class="note loss">' + esc(r.err) + '</p>';
@@ -3018,6 +3109,7 @@
       render();
     },
     'reports-load': () => loadReports(),
+    'reports-save': t => saveReports(!!t.dataset.pick),
     'report-del': t => {
       const id = t.dataset.id;
       if (!arm('rdel-' + id)) return;
@@ -3154,6 +3246,7 @@
     'gather-node': t => { setGather(t.dataset.ids.split(' '), t.checked); later(); },
     'live-kind': t => { const k = LIVE.kinds[+t.dataset.k]; if (k) { k.f = t.value || null; k.sure = !!t.value; k.picked = true; } later(); },
     'live-prob': t => { const p = LIVE.problems[+t.dataset.i]; if (p) p.send = t.checked; },
+    'reports-del-after': t => { UI.reportsDel = t.checked; },
     'g-craft': t => {
       const raw = t.value.trim(), v = raw === '' ? null : num(raw);
       if (raw !== '' && !(v > 0 && v <= 10000)) { toast('Enter the minutes one craft takes you, like 2 or 0.5.'); later(); return; }
