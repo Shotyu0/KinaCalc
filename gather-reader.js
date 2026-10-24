@@ -19,6 +19,9 @@
   // grade. A match closer than MATCH_MAX, and clearly closer than the next best, names the item.
   let ICONS = null;
   const MATCH_MAX = 11, MATCH_GAP = 3;
+  // Icons on Pure panels read 13 to 14 from their own art, so up to MATCH_TITLE counts when the title's
+  // color gives the same grade.
+  const MATCH_TITLE = 15;
   function useIcons(data) {
     if (!data || !Array.isArray(data.icons) || data.size !== 8) return;
     ICONS = data.icons.map(i => ({
@@ -30,7 +33,7 @@
   // the square at small shifts and sizes and keeps the best fit. Summed-area tables of the area around
   // the slot make each try a few lookups.
   const WIN = [12, 60, 64, 109];
-  function matchItem(px) {
+  function matchItem(px, titleGrade) {
     if (!ICONS) return null;
     const ww = WIN[2] - WIN[0] + 1, wh = WIN[3] - WIN[1] + 1, W1 = ww + 1;
     const sat = [new Float64Array(W1 * (wh + 1)), new Float64Array(W1 * (wh + 1)), new Float64Array(W1 * (wh + 1))];
@@ -67,7 +70,7 @@
       for (let n = 1; n < ds2.length; n++) if (ds2[n] < ds2[bi]) bi = n;
       if (!best || ds2[bi] < best.d) best = { i: bi, d: ds2[bi], all: ds2 };
     }
-    if (!best || best.d > MATCH_MAX) return null;
+    if (!best || best.d > (ICONS[best.i].grade === titleGrade ? MATCH_TITLE : MATCH_MAX)) return null;
     // Sure of the item when it beats every other icon by a margin; sure of just the material when it beats
     // every other material's icons, though another grade of the same material comes close.
     let other = Infinity, otherFamily = Infinity;
@@ -93,7 +96,9 @@
       return [f.data[i], f.data[i + 1], f.data[i + 2]];
     };
   }
-  const dark = c => Math.max(c[0], c[1], c[2]) < 64;
+  // The empty bar track is see-through, so bright ground behind it (sand under a Fine panel) lifts it to
+  // about 70.
+  const dark = c => Math.max(c[0], c[1], c[2]) < 100;
   // Success fill: blue while filling, white or lilac when it jumps, cyan when complete.
   const sFill = c => (c[2] > 200 && c[1] > 120 && c[0] < 140) || (c[1] > 200 && c[2] > 200) || (c[0] > 150 && c[2] > 180 && c[1] > 140);
   const sDone = c => c[1] > 220 && c[2] > 220 && c[0] < 170;
@@ -171,7 +176,7 @@
     if (!(count(px, L.sLabel, white) >= 6 && count(px, L.fLabel, white) >= 3 && s.clean > 0.8 && fl.clean > 0.8)) return { present: false };
     const g = grade(px), span = (L.barX1 - L.scanX0) * 2;
     return {
-      present: true, s: s.frac, f: fl.frac, grade: g.name, gradeRgb: g.rgb, icon: itemIcon(px), item: opts && opts.items === false ? null : matchItem(px), blue: panelBlue(px),
+      present: true, s: s.frac, f: fl.frac, grade: g.name, gradeRgb: g.rgb, icon: itemIcon(px), item: opts && opts.items === false ? null : matchItem(px, g.name), blue: panelBlue(px),
       orb: count(px, L.icon, c => c[1] > 120 && c[1] > c[0] + 35 && c[1] > c[2] + 25) >= 25,
       // The white "x2" on the Plentiful Harvest orb. The Ore Appraiser icon shows in the same spot without it.
       x2: count(px, L.x2, c => Math.min(c[0], c[1], c[2]) > 150) >= 8,
@@ -185,6 +190,9 @@
   // How long the popup takes to settle on the grade it opens at: it shows Common first, then flashes to
   // the grade the node rolled.
   const REVEAL = 0.8;
+  // How long the x2 must stay to count as a double. On a double it shows for over a second; the Ore
+  // Appraiser icon can flash white in its spot for a frame as it appears.
+  const X2_HOLD = 0.3;
 
   // Turns readings into extractions, grouped into nodes of up to three. feed(seconds, reading).
   // opts.onDone(extraction) is called as each one finishes. Each extraction has:
@@ -221,7 +229,10 @@
       // When it's only sure of the material (two grades of it look alike), the grade stays with the title.
       if (ICONS) {
         const open = before.filter(s => s.t >= cur.start + REVEAL && s.item != null), fin = cur.result === 'success' ? cur.seen.filter(s => s.t >= cur.resultAt && s.item != null) : [];
-        const openSure = mode(open.filter(s => s.sure).map(s => s.item)), finSure = fin.filter(s => s.sure).map(s => s.item).pop();
+        const openSure = mode(open.filter(s => s.sure).map(s => s.item)), lastSure = fin.filter(s => s.sure).pop(), lastTitle = after[after.length - 1];
+        // A title read after the last sure icon wins when they disagree: Ore Appraiser can raise the grade
+        // after it, and the new grade's icon may only match loosely.
+        const finSure = lastSure && !(lastTitle && lastTitle.t > lastSure.t && lastTitle.g !== ICONS[lastSure.item].grade) ? lastSure.item : undefined;
         const any = mode(open.map(s => s.item)) != null ? mode(open.map(s => s.item)) : fin.map(s => s.item).pop();
         if (any != null) cur.material = ICONS[any].names;
         if (openSure != null) { cur.openItem = ICONS[openSure].names; cur.openGrade = ICONS[openSure].grade; }
@@ -229,7 +240,8 @@
         else if (openSure != null && (cur.result !== 'success' || !after.length || cur.grade === ICONS[openSure].grade)) { cur.item = ICONS[openSure].names; if (cur.result === 'success') cur.grade = ICONS[openSure].grade; }
       }
       cur.tierUp = cur.result === 'success' && cur.grade in RANK && cur.openGrade in RANK && RANK[cur.grade] > RANK[cur.openGrade];
-      cur.qty = cur.result === 'success' ? (cur.x2 >= 2 ? 2 : 1) : 0;
+      cur.qty = cur.result === 'success' ? (cur.x2 >= 2 && cur.x2Last - cur.x2First >= X2_HOLD ? 2 : 1) : 0;
+      delete cur.x2First; delete cur.x2Last;
       // A title color that matched no grade, as hex, so it can be added.
       if (!cur.grade && cur.oddRgb) cur.titleColor = '#' + cur.oddRgb.map(v => Math.round(v).toString(16).padStart(2, '0')).join('');
       delete cur.oddRgb;
@@ -240,7 +252,7 @@
         if (ICONS && !cur.material) cur.odd.push('item not recognized');
         if (!cur.openGrade || (cur.result === 'success' && !cur.grade)) cur.odd.push('grade not recognized');
         if (cur.result === 'interrupted') cur.odd.push('popup closed before a result');
-        if (cur.orb && cur.qty < 2) cur.odd.push('green icon without x2');
+        if (cur.orb && cur.qty < 2 && !cur.tierUp) cur.odd.push('green icon without x2');
         if (cur.tierUp) cur.odd.push('tier-up');
         if (/^(Pure|Radiant)$/.test(cur.grade) || /^(Pure|Radiant)$/.test(cur.openGrade)) cur.odd.push((RANK[cur.grade] > RANK[cur.openGrade] ? cur.grade : cur.openGrade) + ' grade');
       }
@@ -272,7 +284,10 @@
       else if (!cur.result && (r.fDone || r.f >= opts.full)) { cur.result = 'fail'; cur.resultAt = t; }
       // A double needs the green orb and its x2 together: Ore Appraiser's icon is green without the x2,
       // and the edge of a Fine panel can read as white without any green.
-      if (cur.result === 'success') { if (r.x2 && r.orb) cur.x2++; if (r.orb) cur.orb = true; }
+      if (cur.result === 'success') {
+        if (r.x2 && r.orb) { cur.x2++; if (cur.x2First == null) cur.x2First = t; cur.x2Last = t; }
+        if (r.orb) cur.orb = true;
+      }
     }
     function finish(t) { close(t, 'end'); return { extractions: ex, nodes: nodes }; }
     return { feed: feed, finish: finish };
