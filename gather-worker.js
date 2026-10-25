@@ -17,7 +17,7 @@ let perfWin = { at: 0, frames: 0, work: 0 }, perf = null, lastKept = -1, lastRea
 // the player's own report, turns its frames into one picture. Only the popup box is kept, never the rest
 // of the screen. At most two pictures per reason and six in all per session.
 const KEEP = 20, MAX_FRAMES = 32, recent = [], perReason = {};
-let problems = 0;
+let problems = 0, reported = 0;
 function keepFrame(t, r) {
   const info = r.present ? { s: r.s, f: r.f, grade: r.grade, orb: r.orb, x2: r.x2, luck: r.luck, blue: r.blue, item: r.item ? R.iconName(r.item.i) + (r.item.sure ? '' : '?') : null } : null;
   cv.convertToBlob({ type: 'image/jpeg', quality: 0.85 }).then(blob => {
@@ -57,19 +57,25 @@ function summary(ex) {
   o.seconds = +(ex.end - ex.start).toFixed(1);
   return o;
 }
-function problem(reasons, from, ex) {
-  if (problems >= 6) return;
-  const fresh = reasons.filter(r => (perReason[r] || 0) < 2);
-  if (!fresh.length) return;
-  problems++;
-  for (const r of fresh) perReason[r] = (perReason[r] || 0) + 1;
+// Reports the player asks for have their own allowance of five, so automatic pictures never use it up.
+function problem(reasons, from, ex, byPlayer) {
+  if (byPlayer) {
+    if (reported >= 5) { postMessage({ type: 'report-full' }); return; }
+    reported++;
+  } else {
+    if (problems >= 6) return;
+    const fresh = reasons.filter(r => (perReason[r] || 0) < 2);
+    if (!fresh.length) return;
+    problems++;
+    for (const r of fresh) perReason[r] = (perReason[r] || 0) + 1;
+  }
   // Wait a moment so the frames just after it are kept too.
   setTimeout(async () => {
     const frames = framesBetween(from, lastT), s = summary(ex);
     const lines = ['Kina Ledger ' + (mode === 'craft' ? 'crafting' : 'gathering') + ' tracker · ' + version + ' · ' + reasons.join(', '),
       s ? 'Read as: ' + JSON.stringify(s) : 'Reported by the player: the last ' + Math.round(lastT - from) + ' seconds',
       'Box ' + (box ? [box.x, box.y, box.w, box.h].map(v => v.toFixed(4)).join(', ') : 'none') + ' · ' + frames.length + ' frames, ' + (frames.length ? (frames[frames.length - 1].t - frames[0].t).toFixed(1) : 0) + ' s'];
-    try { postMessage({ type: 'problem', reasons: reasons, ex: s, sheet: await sheet(frames, lines) }); } catch (_) {}
+    try { postMessage({ type: 'problem', reasons: reasons, ex: s, sheet: await sheet(frames, lines), byPlayer: !!byPlayer }); } catch (_) {}
   }, 1500);
 }
 
@@ -136,7 +142,7 @@ async function pump(readable) {
   }
   if (tr) tr.finish(lastT);
   // Give a last problem picture time to finish before saying so.
-  setTimeout(() => postMessage({ type: 'ended' }), recent.length && problems ? 1700 : 0);
+  setTimeout(() => postMessage({ type: 'ended' }), recent.length && (problems || reported) ? 1700 : 0);
 }
 // Finds the popup near a rough box (pixels of the last snapshot), reading only the area around it.
 function locate(rough) {
@@ -159,5 +165,5 @@ onmessage = e => {
   else if (m.type === 'snapshot') wantSnap = true;
   else if (m.type === 'locate') locate(m.rough);
   else if (m.type === 'pause') { paused = !!m.on; perfWin = { at: 0, frames: 0, work: 0 }; }
-  else if (m.type === 'report') problem(['reported by the player'], lastT - 15, null);
+  else if (m.type === 'report') problem(['reported by the player'], lastT - 15, null, true);
 };

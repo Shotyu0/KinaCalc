@@ -69,7 +69,7 @@
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
   let GATHERABLE = null; // names of materials gathered from nodes, from data/gather-icons.json
-  const BUILD = '2026-10-25b'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-10-25c'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -2568,11 +2568,13 @@
       LIVE.ex.push(m.ex);
       if (UI.live.state === 'tracking') scheduleRender();
     } else if (m.type === 'problem') {
-      const p = { reasons: m.reasons, ex: m.ex, url: null, send: true, sent: false };
+      const p = { reasons: m.reasons, ex: m.ex, url: null, send: true, sent: false, byPlayer: !!m.byPlayer };
       LIVE.problems.push(p);
       const fr = new FileReader();
-      fr.onload = () => { p.url = fr.result; scheduleRender(); };
+      fr.onload = () => { p.url = fr.result; scheduleRender(); if (p.byPlayer) sendReport(p); };
       fr.readAsDataURL(m.sheet);
+    } else if (m.type === 'report-full') {
+      toast('That’s five reports this session already. Stop and track again to send more.');
     } else if (m.type === 'ended') liveFinished();
   }
   // Stops sharing. The worker then closes the extraction in progress and says it has ended.
@@ -2773,10 +2775,10 @@
       h += '<div class="row-gap"><button class="btn primary" data-act="live-stop">Stop and save</button><button class="btn" data-act="live-pause">' + (paused ? 'Resume' : 'Pause') + '</button>' +
         '<button class="btn ghost" data-act="live-recal">Find the popup again</button><button class="btn ghost" data-act="live-report">Report a problem</button>' +
         '<button class="btn ghost danger' + (UI.confirm === 'live-discard' ? ' armed' : '') + '" data-act="live-discard">' + (UI.confirm === 'live-discard' ? 'Click again to discard' : 'Discard') + '</button></div>' +
-        (LIVE.problems.length ? '<p class="help">' + plural(LIVE.problems.length, 'odd moment') + ' saved as pictures of the popup. You can send them when you stop.</p>' : '') +
+        problemsLine() +
         '<div class="live-limit"><label for="live-limit">Stop after</label><input id="live-limit" class="in num" inputmode="numeric" maxlength="3" value="' + (LIVE.limit || '') + '" placeholder="—" data-chg="live-limit" aria-describedby="live-limit-help"><span>minutes of gathering</span></div>' +
         '<p class="help" id="live-limit-help">The timer starts at your first gather. When it ends, tracking stops and saves by itself, with a chime. It’s remembered in this browser; leave it empty to stop yourself.</p>' +
-        '<p class="note">Switch to the game whenever you like: tracking keeps going in the background, and closing this tab stops it. Gathering more than one kind of node? Each is told apart by its item icon and saved to its own node. If something reads wrong, <strong>Report a problem</strong> keeps a picture of the last 15 seconds of the popup.</p>';
+        '<p class="note">Switch to the game whenever you like: tracking keeps going in the background, and closing this tab stops it. Gathering more than one kind of node? Each is told apart by its item icon and saved to its own node. If something reads wrong, <strong>Report a problem</strong> sends the owner a picture of the last 15 seconds of the popup' + (liveCanSend() ? '' : ' (here it’s kept for you to download when you stop)') + '.</p>';
     } else if (st === 'review') {
       const ready = kinds.every(x => x.k.f), unsent = S.mode === 'db' && LIVE.problems.some(p => p.send && !p.sent);
       h += problemsHTML() +
@@ -2802,7 +2804,7 @@
       h += '<div class="row-gap"><button class="btn primary" data-act="live-stop">Stop and save</button><button class="btn" data-act="live-pause">' + (paused ? 'Resume' : 'Pause') + '</button>' +
         '<button class="btn ghost" data-act="live-recal">Find the popup again</button><button class="btn ghost" data-act="live-report">Report a problem</button>' +
         '<button class="btn ghost danger' + (UI.confirm === 'live-discard' ? ' armed' : '') + '" data-act="live-discard">' + (UI.confirm === 'live-discard' ? 'Click again to discard' : 'Discard') + '</button></div>' +
-        (LIVE.problems.length ? '<p class="help">' + plural(LIVE.problems.length, 'odd moment') + ' saved as pictures of the popup. You can send them when you stop.</p>' : '') +
+        problemsLine() +
         '<p class="note">Crafts in a batch each count on their own, and a combo’s Splendent craft counts with the craft it came from. Only crafts of ' + name + ' are counted, so stop before crafting something else.</p>';
     } else if (st === 'review') {
       const unsent = S.mode === 'db' && LIVE.problems.some(p => p.send && !p.sent);
@@ -2810,6 +2812,44 @@
         '<button class="btn ghost danger' + (UI.confirm === 'live-discard' ? ' armed' : '') + '" data-act="live-discard">' + (UI.confirm === 'live-discard' ? 'Click again to discard' : 'Discard') + '</button></div>';
     }
     return h + '</section>';
+  }
+  function liveCanSend() { return S.mode === 'db' && !!S.email && !!DB; }
+  // Sends problem pictures to the owner. Each counts as sent once the database has it; a refused one stays
+  // ticked, to send again or download. Resolves to how many were sent, how many were too large, and the
+  // first error.
+  async function sendProblems(list) {
+    const go = list.filter(p => p.url && !p.sent && !p.sending && p.url.length <= 990000), big = list.filter(p => p.url && p.url.length > 990000).length;
+    for (const p of go) p.sending = true;
+    scheduleRender();
+    const errs = await Promise.all(go.map(p => new Promise(res => res(DB.doc('reports/' + uid('rp')).set({ by: S.email, at: Date.now(), version: BUILD, reasons: p.reasons.join(', ').slice(0, 300),
+      note: String(UI.live.note || '').slice(0, 1000), ex: JSON.stringify(p.ex || {}).slice(0, 4000), sheet: p.url })))
+      .then(() => { p.sent = true; return null; }, e => e || new Error('refused')).then(e => { p.sending = false; return e; })));
+    const failed = errs.filter(Boolean);
+    scheduleRender();
+    return { sent: go.length - failed.length, big: big, err: failed[0] || null };
+  }
+  // A report the player asked for goes to the owner as soon as its picture is ready.
+  async function sendReport(p) {
+    if (!liveCanSend()) return;
+    const r = await sendProblems([p]);
+    if (r.err) writeFailed(r.err, 'reports/');
+    else if (r.big) toast('That picture is too large to send. Download it when you stop.');
+    else if (r.sent) toast('Sent a picture of the last 15 seconds to the owner. Thanks!');
+  }
+  // What's happened to the pictures so far, for the tracking panels.
+  function problemsLine() {
+    const mine = LIVE.problems.filter(p => p.byPlayer), auto = LIVE.problems.length - mine.length, out = [];
+    if (mine.length) {
+      const sent = mine.filter(p => p.sent).length, going = mine.filter(p => !p.sent && (p.sending || !p.url)).length, stuck = mine.length - sent - going;
+      if (!liveCanSend()) out.push(plural(mine.length, 'report') + ' kept as pictures. Download them when you stop, and send them to the owner.');
+      else {
+        if (sent) out.push(plural(sent, 'report') + ' sent to the owner.');
+        if (going) out.push('Sending ' + (going === 1 ? 'a report' : going + ' reports') + '…');
+        if (stuck) out.push((stuck === 1 ? 'A report' : stuck + ' reports') + ' didn’t send. You can send or download ' + (stuck === 1 ? 'it' : 'them') + ' when you stop.');
+      }
+    }
+    if (auto) out.push(plural(auto, 'odd moment') + ' saved as pictures of the popup. You can send them when you stop.');
+    return out.length ? '<p class="help">' + out.join(' ') + '</p>' : '';
   }
   // Pictures of odd moments, to send to the owner (or download) so misreads can be fixed.
   function problemsHTML() {
@@ -3310,22 +3350,19 @@
       if (S.mode === 'db' && LIVE.problems.some(p => p.send && !p.sent) && !arm('live-save')) return;
       liveSave(); liveReset(); render();
     },
-    'live-report': () => { if (!LIVE.worker) return; LIVE.worker.postMessage({ type: 'report' }); toast('Saving a picture of the last 15 seconds of the popup.'); },
-    // Each picture counts as sent once the database has it. A refused one stays ticked, to try again or
-    // download.
+    'live-report': () => {
+      if (!LIVE.worker) return;
+      LIVE.worker.postMessage({ type: 'report' });
+      toast(liveCanSend() ? 'Sending a picture of the last 15 seconds of the popup to the owner…' : 'Keeping a picture of the last 15 seconds of the popup. Download it when you stop, and send it to the owner.');
+    },
     'live-send': async () => {
-      if (S.mode !== 'db' || !S.email || !DB) return;
+      if (!liveCanSend()) return;
       const todo = LIVE.problems.filter(p => p.send && !p.sent && !p.sending && p.url);
       if (!todo.length) { toast('Tick at least one picture to send.'); return; }
-      const go = todo.filter(p => p.url.length <= 990000), big = todo.length - go.length;
-      if (!go.length) { toast('Those pictures are too large to send. Download them instead.'); return; }
-      for (const p of go) p.sending = true;
-      render();
-      const errs = await Promise.all(go.map(p => DB.doc('reports/' + uid('rp')).set({ by: S.email, at: Date.now(), version: BUILD, reasons: p.reasons.join(', ').slice(0, 300), note: String(UI.live.note || '').slice(0, 1000), ex: JSON.stringify(p.ex || {}).slice(0, 4000), sheet: p.url })
-        .then(() => { p.sent = true; return null; }, e => e).then(e => { p.sending = false; return e; })));
-      const failed = errs.filter(Boolean), sent = go.length - failed.length;
-      if (failed.length) writeFailed(failed[0], 'reports/');
-      else toast('Sent ' + plural(sent, 'picture') + ' to the owner. Thanks!' + (big ? ' ' + (big === 1 ? 'One was' : big + ' were') + ' too large; download ' + (big === 1 ? 'it' : 'them') + ' instead.' : ''));
+      const r = await sendProblems(todo);
+      if (r.err) writeFailed(r.err, 'reports/');
+      else if (!r.sent) toast('Those pictures are too large to send. Download them instead.');
+      else toast('Sent ' + plural(r.sent, 'picture') + ' to the owner. Thanks!' + (r.big ? ' ' + (r.big === 1 ? 'One was' : r.big + ' were') + ' too large; download ' + (r.big === 1 ? 'it' : 'them') + ' instead.' : ''));
       render();
     },
     'reports-load': () => loadReports(),
