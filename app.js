@@ -69,7 +69,7 @@
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
   let GATHERABLE = null; // names of materials gathered from nodes, from data/gather-icons.json
-  const BUILD = '2026-10-25a'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-10-25b'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -292,6 +292,8 @@
   // session: minutes (m) and items (n). From tracked ones: extractions, successes, doubles, tier-ups,
   // seconds gathering, active, moving and break seconds, and [extractions, successes] by the grade they
   // opened at (g: Common, Fine, Pure, Radiant). No names. Success depends on each person's level and skills.
+  // Here g is a list of four pairs; it's stored as { Common: [x, ok], … }, since Firestore can't hold a list
+  // inside a list.
   const POOL_KEYS = ['m', 'x', 'ok', 'd', 'u', 'sec', 'act', 'mov', 'brk'];
   function myPoolStats() {
     const st = {}, r1 = v => Math.round(v * 10) / 10;
@@ -311,8 +313,9 @@
     for (const k of POOL_KEYS) { const v = num(o[k]); s[k] = ok(v) ? v : 0; }
     s.n = {};
     if (o.n && typeof o.n === 'object') for (const id of Object.keys(o.n)) { const v = num(o.n[id]); if (ID_RE.test(id) && ok(v)) s.n[id] = v; }
-    s.g = [0, 1, 2, 3].map(i => {
-      const v = Array.isArray(o.g) && Array.isArray(o.g[i]) ? o.g[i] : [], a = ok(num(v[0])) ? num(v[0]) : 0, b = ok(num(v[1])) ? num(v[1]) : 0;
+    s.g = OPEN_GRADES.map((grade, i) => {
+      const w = o.g && typeof o.g === 'object' ? (Array.isArray(o.g) ? o.g[i] : o.g[grade]) : null;
+      const v = Array.isArray(w) ? w : [], a = ok(num(v[0])) ? num(v[0]) : 0, b = ok(num(v[1])) ? num(v[1]) : 0;
       return [a, Math.min(a, b)];
     });
     s.ok = Math.min(s.ok, s.x); s.d = Math.min(s.d, s.ok); s.u = Math.min(s.u, s.ok);
@@ -345,15 +348,23 @@
     if (!force && (key === poolSent || (had && canon([had.nodes, had.st, had.private]) === key))) { poolSent = key; return; }
     poolSent = key;
     const body = { nodes: nodes, at: Date.now() };
-    if (Object.keys(st).length) body.st = st;
+    if (Object.keys(st).length) {
+      body.st = {};
+      for (const f of Object.keys(st)) {
+        const g = {};
+        OPEN_GRADES.forEach((grade, i) => { if (st[f].g[i][0]) g[grade] = st[f].g[i]; });
+        body.st[f] = Object.assign({}, st[f], { g: g });
+      }
+    }
     if (priv) body.private = true;
     // Firestore with the older rules refuses the totals; then just the counts go, as before, so no one
-    // sees an error before the owner publishes the new rules.
-    const ref = DB.doc('pool/' + S.uid);
-    ref.set(body).catch(e => {
+    // sees an error before the owner publishes the new rules. Data Firestore can't store at all is refused
+    // before anything is sent, so that's caught too.
+    const ref = DB.doc('pool/' + S.uid), failed = e => {
       if (e && e.code === 'permission-denied' && (body.st || body.private)) { S.poolRefused = true; scheduleRender(); ref.set({ nodes: nodes, at: body.at }).catch(e2 => writeFailed(e2, 'pool/' + S.uid)); }
       else writeFailed(e, 'pool/' + S.uid);
-    });
+    };
+    try { ref.set(body).catch(failed); } catch (e) { failed(e); }
   }
   // Everyone's totals per node: each member's shared ones, and yours from your own sessions.
   function communityStats() {
