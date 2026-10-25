@@ -69,7 +69,7 @@
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
   let GATHERABLE = null; // names of materials gathered from nodes, from data/gather-icons.json
-  const BUILD = '2026-10-24f'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-10-25a'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -351,7 +351,7 @@
     // sees an error before the owner publishes the new rules.
     const ref = DB.doc('pool/' + S.uid);
     ref.set(body).catch(e => {
-      if (e && e.code === 'permission-denied' && (body.st || body.private)) ref.set({ nodes: nodes, at: body.at }).catch(e2 => writeFailed(e2, 'pool/' + S.uid));
+      if (e && e.code === 'permission-denied' && (body.st || body.private)) { S.poolRefused = true; scheduleRender(); ref.set({ nodes: nodes, at: body.at }).catch(e2 => writeFailed(e2, 'pool/' + S.uid)); }
       else writeFailed(e, 'pool/' + S.uid);
     });
   }
@@ -2214,6 +2214,17 @@
     let h = '<section class="panel"><div class="toolbar"><h2 class="sec-h">Everyone’s gathering</h2><span class="help">' + (people.size ? (people.size === 1 ? '1 person' : NF0.format(people.size) + ' people') + ' so far' : '') + '</span></div>' +
       '<p class="help">Totals from everyone in the price book who gathers, with no names: time logged, what they got, and from tracked sessions how often extractions succeed (by the grade they opened at), double and tier up. Success depends on each person’s gathering level and skills, so this is the group’s average; yours is in each node above. Kina per hour is their logged time at today’s prices, after ' + feesTxt() + '.</p>' +
       '<label class="check"><input type="checkbox" data-chg="pool-share"' + (me && me.private ? '' : ' checked') + '> Share my gathering totals with the group</label>';
+    // What the pool holds from the others, so it's clear why someone's missing.
+    let totals = 0, counts = 0, off = 0;
+    for (const [uid, p] of S.pool) {
+      if (uid === S.uid) continue;
+      if (p.private) off++;
+      else if (Object.values(p.st || {}).some(o => o.m > 0 || o.x > 0)) totals++;
+      else if (Object.values(p.nodes || {}).some(c => c.some(v => v))) counts++;
+    }
+    if (S.poolRefused) h += '<p class="note loss">Firestore turned down sharing totals: it still has the older rules. ' + (canManage() ? 'Publish the new <strong>firestore.rules</strong> in the Firebase console (Firestore, then Rules), then reload this page. Everyone else’s totals come in as they reload theirs.' : 'Let the owner know the price book’s rules need updating. Reload this page once they have.') + '</p>';
+    if (totals + counts + off) h += '<p class="help"><strong>Other members:</strong> ' + [totals ? totals + ' sharing totals' : '', counts ? counts + ' sending only how often nodes open' : '', off ? off + ' with sharing off' : ''].filter(Boolean).join(' · ') + '.' +
+      (counts ? ' Only how often nodes open comes from a page opened before this version, or before the rules were updated. Reloading the page fixes it.' : '') + '</p>';
     if (!rows.length) return h + '<p class="help">Nothing shared yet. Totals appear as members open this version of the page.</p></section>';
     h += '<div class="well"><table class="grid gath ev"><thead><tr><th scope="col">Node</th><th class="num" scope="col">Time</th><th class="num" scope="col">Succeeded</th>' +
       '<th class="num" scope="col">Doubled · tiered up</th><th class="num" scope="col">Per extraction</th><th class="num" scope="col">Items per hour</th><th class="num" scope="col">Sell it all</th></tr></thead><tbody>';
