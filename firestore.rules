@@ -33,7 +33,8 @@ service cloud.firestore {
     }
     // A price entry: only the fields the page writes, with sane types and sizes.
     function validItem(d) {
-      return d.keys().hasOnly(['name', 'price', 'vendor', 'gather', 'bound', 'unavailable', 'updatedAt', 'hist', 'example'])
+      return d.keys().hasOnly(['name', 'price', 'vendor', 'gather', 'bound', 'unavailable', 'updatedAt', 'hist', 'example', 'marketKey'])
+        && (!('marketKey' in d) || (d.marketKey is string && d.marketKey.matches('[0-9]{9}')))
         && d.name is string && d.name.size() > 0 && d.name.size() <= 120
         && optNumber(d, 'price') && optNumber(d, 'vendor') && optTime(d, 'updatedAt')
         && optBool(d, 'gather') && optBool(d, 'bound') && optBool(d, 'unavailable') && optBool(d, 'example')

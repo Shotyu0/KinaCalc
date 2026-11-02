@@ -66,10 +66,11 @@
   };
   const ROUTE = { buy: 'Market', vendor: 'NPC', gather: 'Gather', craft: 'Craft', combo: 'Combo', missing: 'No price' };
   const ID_RE = /^[A-Za-z0-9_\-.~:@+]{1,160}$/;
+  const MARKET_KEY = /^\d{9}$/;
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
   let GATHERABLE = null; // names of materials gathered from nodes, from data/gather-icons.json
-  const BUILD = '2026-11-01a'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-11-02a'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -485,7 +486,10 @@
   function readMats(a) { return Array.isArray(a) ? a.filter(m => m && m.item).map(m => ({ item: String(m.item), qty: num(m.qty) || 0 })) : []; }
   function readItem(id, x) {
     x = x || {};
-    return { id: id, name: String(x.name == null ? id : x.name).trim(), price: num(x.price), vendor: num(x.vendor), gather: !!x.gather, bound: !!x.bound, unavailable: !!x.unavailable, updatedAt: num(x.updatedAt), hist: readHist(x.hist), example: !!x.example };
+    const it = { id: id, name: String(x.name == null ? id : x.name).trim(), price: num(x.price), vendor: num(x.vendor), gather: !!x.gather, bound: !!x.bound, unavailable: !!x.unavailable, updatedAt: num(x.updatedAt), hist: readHist(x.hist), example: !!x.example };
+    // The item's 9-digit key on aion2.exchange, learned from a pasted table. Left off when unknown.
+    if (MARKET_KEY.test(x.marketKey)) it.marketKey = x.marketKey;
+    return it;
   }
   function readRecipe(id, x) {
     x = x || {};
@@ -1866,11 +1870,90 @@
   }
 
   function shotsView() {
-    return '<div class="toolbar"><h2 class="sec-h">Import prices</h2></div>' + pasteHTML();
+    return '<div class="toolbar"><h2 class="sec-h">Import prices</h2></div>' + marketPanel() + pasteHTML();
+  }
+
+  /* ---------- market prices from aion2.exchange, through the relay in relay/worker.js ---------- */
+  const MKT = { asking: false, note: '' };
+  const MKT_BATCH = 50; // aion2.exchange answers 50 items at a time
+  function relayUrl() {
+    const r = window.KINA_CONFIG && window.KINA_CONFIG.relay;
+    return typeof r === 'string' && /^https:\/\//.test(r) ? r.replace(/\/+$/, '') : null;
+  }
+  function mktServer() {
+    const s = window.KINA_CONFIG && window.KINA_CONFIG.marketServer;
+    return s && /^[A-Za-z0-9_-]{1,40}$/.test(String(s.id)) ? { id: String(s.id), name: String(s.name || s.id) } : null;
+  }
+  async function relayGet(path) {
+    const user = AUTH && AUTH.currentUser;
+    if (!user) throw new Error('sign in first.');
+    const res = await fetch(relayUrl() + path, { headers: { Authorization: 'Bearer ' + await user.getIdToken() } });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(body && body.error || 'the relay answered ' + res.status + '.');
+    return body;
+  }
+  // aion2.exchange's answer: { items: [{ item_key, price, listed, captured_at, … }] }. Only items listed now count.
+  function readPrices(d) {
+    const prices = new Map();
+    let at = 0;
+    for (const x of d && Array.isArray(d.items) ? d.items : []) {
+      const k = String(x && x.item_key), p = num(x && x.price);
+      if (!MARKET_KEY.test(k) || x.listed === false || !(p > 0)) continue;
+      prices.set(k, p);
+      at = Math.max(at, Date.parse(x.captured_at) || 0);
+    }
+    return { prices: prices, at: at };
+  }
+  function keyedItems() { return [...S.items.values()].filter(it => it.marketKey && !it.unavailable); }
+  function marketPanel() {
+    const server = mktServer();
+    if (!relayUrl() || !server) return '';
+    let h = '<section class="panel"><h3 class="sec-h">Market prices from aion2.exchange</h3>';
+    if (S.mode !== 'db') return h + '<p class="help">Sign in to the shared price book to refresh prices from aion2.exchange.</p></section>';
+    const have = keyedItems().length;
+    h += '<p class="help">Asks aion2.exchange for the cheapest listing on ' + esc(server.name) + ' of each item whose market key is known: ' + NF0.format(have) + ' of ' + plural(S.items.size, 'item') + ' so far. ' +
+      'An item’s key is learned when you paste a table from aion2.exchange below. Nothing is saved until you check the list.</p>' +
+      '<div class="row-gap"><button class="btn primary" data-act="mkt-refresh"' + (MKT.asking || !have ? ' disabled' : '') + '>' + (MKT.asking ? 'Asking aion2.exchange…' : 'Refresh market prices') + '</button></div>';
+    if (MKT.note) h += '<p class="help" role="status">' + esc(MKT.note) + '</p>';
+    h += '</section>';
+    if (UI.shots.market && UI.shots.source === 'market') h += marketReview();
+    return h;
+  }
+  // Changed prices go to the usual check list; unchanged ones are kept to mark as current when it's saved.
+  async function marketRefresh() {
+    const server = mktServer(), items = keyedItems();
+    if (!server || !items.length || MKT.asking) return;
+    MKT.asking = true; MKT.note = ''; render();
+    const prices = new Map(), keys = [...new Set(items.map(it => it.marketKey))];
+    let at = 0;
+    try {
+      for (let i = 0; i < keys.length; i += MKT_BATCH) {
+        const got = readPrices(await relayGet('/items?server=' + encodeURIComponent(server.id) + '&keys=' + keys.slice(i, i + MKT_BATCH).join(',')));
+        for (const [k, p] of got.prices) prices.set(k, p);
+        at = Math.max(at, got.at);
+      }
+    } catch (e) { MKT.asking = false; MKT.note = 'Couldn’t refresh: ' + e.message; render(); return; }
+    MKT.asking = false;
+    const C = buildCalc(), rows = [], same = [];
+    let none = 0;
+    for (const it of items) {
+      const p = prices.get(it.marketKey);
+      if (!(p > 0)) { none++; continue; }
+      if (p === num(it.price)) { same.push({ id: it.id, price: p }); continue; }
+      const doubt = newPriceDoubt(it, p, C);
+      rows.push({ read: null, name: it.name, include: !doubt, priceText: NF0.format(p), doubt: doubt });
+    }
+    UI.shots.market = rows.length || same.length ? rows : null; UI.shots.same = same; UI.shots.source = 'market';
+    const doubtful = rows.filter(r => r.doubt).length;
+    MKT.note = (at ? 'aion2.exchange last read the market ' + ago(at) + '. ' : '') +
+      (rows.length ? plural(rows.length, 'price') + ' changed' : 'No prices changed') + (same.length ? ', ' + NF0.format(same.length) + ' stayed the same' : '') +
+      (none ? ', ' + plural(none, 'item') + ' had no listings' : '') + '.' + (doubtful ? ' ' + plural(doubtful, 'price') + ' looked wrong and ' + (doubtful === 1 ? 'is' : 'are') + ' unticked.' : '') +
+      (rows.length ? ' Check them below, then save.' : same.length ? ' Save to mark them as current.' : '');
+    render();
   }
   function pasteHTML() {
     const st = UI.shots;
-    let h = '<p class="help">Copy a price list from any website, spreadsheet or chat message and paste it below. On aion2.exchange, select the table from the Item header down to the last row, then copy. Each item name is matched to your item list and the first price after it is used, skipping the 9-digit item ID. Items that aren’t on your list are ignored. If an item appears more than once, its lowest price is kept. Nothing is saved until you check the list and click Save.</p>' +
+    let h = '<p class="help">Copy a price list from any website, spreadsheet or chat message and paste it below. On aion2.exchange, select the table from the Item header down to the last row, then copy. Each item name is matched to your item list and the first price after it is used, skipping the 9-digit item ID. That ID is remembered on save, so the item can be refreshed from aion2.exchange later. Items that aren’t on your list are ignored. If an item appears more than once, its lowest price is kept. Nothing is saved until you check the list and click Save.</p>' +
       '<div class="field"><label for="paste-in">Pasted prices</label><textarea id="paste-in" class="in" rows="8" data-inp="paste-text" placeholder="Odyle	1,520&#10;Fine Odyle	4,800&#10;Orichalcum Ore	2.1k">' + esc(st.pasteText || '') + '</textarea></div>' +
       '<div class="row-gap"><button class="btn primary" data-act="paste-read">Read prices</button>' + (st.pasteText ? '<button class="btn ghost" data-act="paste-clear">Clear</button>' : '') + '</div>';
     if (st.pasteNote) h += '<p class="help" role="status">' + esc(st.pasteNote) + '</p>';
@@ -1934,8 +2017,10 @@
         price = priceIn(cells[j]);
       }
       if (price == null) continue;
+      // aion2.exchange puts the item's 9-digit key right after its name: remembered for refreshing later.
+      const key = !hit.rest && i + 1 < cells.length && isItemId(cells[i + 1]) ? cells[i + 1] : null;
       const prev = best.get(hit.it.id);
-      if (!prev || price < prev.price) best.set(hit.it.id, { read: cells[i], name: hit.it.name, price: price });
+      if (!prev || price < prev.price) best.set(hit.it.id, { read: cells[i], name: hit.it.name, price: price, key: key || (prev && prev.key) });
     }
     return { rows: [...best.values()], found: found, unknown: unknown, known: known.length, seen: seen, cells: cells.length };
   }
@@ -1954,10 +2039,11 @@
   }
   function marketReview() {
     const rows = UI.shots.market;
-    const n = rows.filter(r => r.include).length;
+    const n = rows.filter(r => r.include).length, same = UI.shots.source === 'market' && UI.shots.same ? UI.shots.same.length : 0;
     let h = '<section class="panel"><div class="toolbar"><h3 class="sec-h">' + 'Check the prices found' + '</h3><div class="row-gap"><button class="btn ghost" data-act="shot-discard">Discard</button>' +
-      '<button class="btn primary" data-act="shot-apply"' + (n ? '' : ' disabled') + '>Save ' + plural(n, 'price') + '</button></div></div>' +
-      '<p class="help">Fix any name that matched the wrong item, untick rows you don’t want, then save.</p>' +
+      '<button class="btn primary" data-act="shot-apply"' + (n || same ? '' : ' disabled') + '>' + (n || !same ? 'Save ' + plural(n, 'price') : 'Mark ' + plural(same, 'price') + ' as current') + '</button></div></div>' +
+      '<p class="help">' + (rows.length ? 'Fix any name that matched the wrong item, untick rows you don’t want, then save.' : '') +
+      (same ? (rows.length ? ' ' : '') + 'Saving also marks the ' + plural(same, 'price') + ' that stayed the same as current.' : '') + '</p>' +
       '<div class="well"><table class="grid prices" style="min-width:640px"><thead><tr><th class="c">Save</th><th>Item</th><th>Change</th><th class="num w-num">Price per unit</th></tr></thead><tbody>';
     rows.forEach((r, i) => {
       const match = findItem(r.name);
@@ -3418,6 +3504,7 @@
         hist.sort((a, b) => a.t - b.t);
         const newer = x.price != null && ((x.updatedAt || 0) > (ex.updatedAt || 0) || ex.price == null);
         const next = Object.assign({}, ex, { price: newer ? x.price : ex.price, updatedAt: newer ? x.updatedAt : ex.updatedAt, vendor: ex.vendor != null ? ex.vendor : x.vendor, gather: ex.gather || x.gather, bound: ex.bound || x.bound, unavailable: !!(ex.unavailable || x.unavailable), hist: hist.slice(-HIST_MAX) });
+        if (!next.marketKey && x.marketKey) next.marketKey = x.marketKey;
         delete next.virtual;
         Store.putItem(next);
       } else {
@@ -3642,11 +3729,12 @@
       const C = buildCalc();
       st.market = res.rows.map(r => {
         const doubt = newPriceDoubt(findItem(r.name), r.price, C);
-        return { read: null, name: r.name, include: !doubt, priceText: NF0.format(r.price), doubt: doubt };
+        return { read: null, name: r.name, include: !doubt, priceText: NF0.format(r.price), doubt: doubt, key: r.key, keyFor: r.name };
       });
-      const doubtful = st.market.filter(r => r.doubt).length;
+      const doubtful = st.market.filter(r => r.doubt).length, keys = res.rows.filter(r => r.key && (findItem(r.name) || {}).marketKey !== r.key).length;
       st.pasteNote = res.rows.length ? 'Found ' + plural(res.rows.length, 'price') + ' for items on your list.' +
-        (doubtful ? ' ' + plural(doubtful, 'price') + ' looked wrong and ' + (doubtful === 1 ? 'is' : 'are') + ' unticked.' : '') + ' Check them below, then save.'
+        (doubtful ? ' ' + plural(doubtful, 'price') + ' looked wrong and ' + (doubtful === 1 ? 'is' : 'are') + ' unticked.' : '') + ' Check them below, then save.' +
+        (keys ? ' Saving also remembers the aion2.exchange key of ' + plural(keys, 'item') + '.' : '')
         : res.found ? 'Found item names but no prices next to them. Try copying the price column too.'
         : !res.known ? 'There’s no item list to match against, because the recipe list didn’t load. Reload the page and try again.'
         : 'None of the item names on your list were found in that text.' + (res.unknown.length
@@ -3655,7 +3743,8 @@
       render();
     },
     'paste-clear': () => { UI.shots.pasteText = ''; UI.shots.pasteNote = ''; if (UI.shots.source === 'paste') UI.shots.market = null; render(); },
-    'shot-discard': () => { UI.shots.market = null; UI.shots.error = ''; render(); },
+    'shot-discard': () => { UI.shots.market = null; UI.shots.same = null; UI.shots.error = ''; MKT.note = ''; render(); },
+    'mkt-refresh': () => marketRefresh(),
     'shot-apply': () => applyMarket(),
     'io-export': () => { UI.io.exportText = JSON.stringify({ app: 'kina-ledger', version: 3, exportedAt: new Date().toISOString(), settings: S.settings, myLevels: myLevels(), myGather: S.uid ? [...myGather()] : null, myRuns: myRuns(), myCrafts: myCrafts(), myCraftMin: myCraftMin(), myChecklist: myChecklist(), items: [...S.items.values()], recipes: [...S.recipes.values()] }, null, 2); render(); },
     'io-hide': () => { UI.io.exportText = ''; render(); },
@@ -3812,16 +3901,23 @@
       if (!r.include) continue;
       const p = num(r.priceText), name = r.name.trim();
       if (!(p > 0) || !name) continue;
+      // A key read next to the name goes with it, unless the row was renamed to another item.
+      const key = r.key && norm(r.keyFor) === norm(name) ? r.key : null;
       const it = findItem(name);
-      if (it) { Store.putItem(withPrice(it, p, ts)); upd++; }
+      if (it) { Store.putItem(Object.assign(withPrice(it, p, ts), key ? { marketKey: key } : {})); upd++; }
       else {
         const id = S.items.has(slugId(name)) ? uid('i') : slugId(name);
-        Store.putItem(withPrice({ id: id, name: name, price: null, vendor: null, gather: false, bound: /\(bound\)/i.test(name), updatedAt: null, hist: [] }, p, ts));
+        Store.putItem(withPrice(Object.assign({ id: id, name: name, price: null, vendor: null, gather: false, bound: /\(bound\)/i.test(name), updatedAt: null, hist: [] }, key ? { marketKey: key } : {}), p, ts));
         add++;
       }
     }
-    UI.shots.market = null; UI.shots.status = 'idle';
-    toast('Saved ' + plural(upd, 'price') + (add ? ' and added ' + plural(add, 'new item') : '') + '.');
+    let cur = 0;
+    if (UI.shots.source === 'market') for (const x of UI.shots.same || []) {
+      const it = S.items.get(x.id);
+      if (it && num(it.price) === x.price) { Store.putItem(withPrice(it, x.price, ts)); cur++; }
+    }
+    UI.shots.market = null; UI.shots.same = null; UI.shots.status = 'idle'; MKT.note = '';
+    toast('Saved ' + plural(upd, 'price') + (add ? ' and added ' + plural(add, 'new item') : '') + (cur ? (add ? ', and marked ' : ' and marked ') + NF0.format(cur) + ' unchanged as current' : '') + '.');
     render();
   }
 
