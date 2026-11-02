@@ -236,6 +236,31 @@ tr.detail > td { background: var(--sunk); padding: 16px; border-top: 0; }
 .live { border-color: var(--gold); }
 .live-time { font: 600 22px/1 var(--f-ui); font-variant-numeric: tabular-nums; }
 .live-status { font-size: 14px; color: var(--ink-2); }
+/* Checklist */
+.ck-chars { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 16px; }
+.ck-char { appearance: none; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--sunk); color: var(--ink); font: inherit; cursor: pointer; text-align: left; }
+.ck-char span { font-size: 12px; color: var(--ink-3); }
+.ck-char[aria-pressed="true"] { background: var(--gold-soft); border-color: var(--gold); }
+.ck-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 22px; }
+@media (max-width: 760px) { .ck-grid { grid-template-columns: 1fr; } }
+.ck-h { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin: 0 0 4px; font: 600 13px/1.3 var(--f-label); letter-spacing: .06em; text-transform: uppercase; color: var(--ink-2); }
+.ck-h .help { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.ck-list { list-style: none; margin: 0; padding: 0; }
+.ck-row { padding: 9px 0; border-top: 1px solid var(--line); }
+.ck-row:first-child { border-top: 0; }
+.ck-main { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.ck-row .help { margin: 3px 0 0; }
+.ck-done .ck-name { color: var(--ink-3); }
+.ck-count { display: inline-flex; align-items: center; gap: 6px; }
+.ck-count .btn { min-width: 32px; padding: 4px 0; font-size: 16px; }
+.ck-n { min-width: 4.2em; text-align: center; font-variant-numeric: tabular-nums; }
+.ck-done .ck-n { color: var(--gain); font-weight: 600; }
+.ck-off { opacity: .55; }
+.ck-edit { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); display: grid; gap: 10px; }
+.ck-edit .in { width: auto; }
+.ck-edit input.in:not(.ck-max) { flex: 1 1 200px; max-width: 340px; }
+.ck-edit .ck-main { justify-content: flex-start; }
+.ck-edit .ck-max { width: 4em; }
 .live-limit { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 14px; }
 .live-limit .in { width: 5em; }
 .live-snap { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 8px; cursor: crosshair; touch-action: none; }

@@ -58,7 +58,7 @@
   const HIST_MAX = 200;
   const HIST_MERGE_MS = 10 * 60 * 1000;
   const PAGE = 50;
-  const TABS = [['rank', 'Rankings'], ['gather', 'Gathering'], ['recipes', 'Recipes'], ['prices', 'Prices'], ['shots', 'Import'], ['settings', 'Settings']];
+  const TABS = [['rank', 'Rankings'], ['gather', 'Gathering'], ['recipes', 'Recipes'], ['prices', 'Prices'], ['shots', 'Import'], ['check', 'Checklist'], ['settings', 'Settings']];
   const METRIC = {
     buy: { short: 'Buying all mats', hint: 'Every material bought at its cheapest source: the market, an NPC vendor, or crafting it from bought parts.' },
     gather: { short: 'With own gathering', hint: 'Materials you mark as gatherable cost nothing. This is the Kina you actually take home.' },
@@ -69,7 +69,7 @@
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
   let GATHERABLE = null; // names of materials gathered from nodes, from data/gather-icons.json
-  const BUILD = '2026-10-25c'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-11-01a'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -146,7 +146,7 @@
     }
     return s;
   }
-  const UI_KEYS = { tab: 's', goal: 's', metric: 's', per: 's', prof: 's', crafts: 's', wanted: 's', planGather: 'b', priceSort: 's', priceFilter: 's', rankAll: 'b', canCraft: 'b', recProf: 's', recSrc: 's', budget: 's', affordOnly: 'b', gatherShow: 's', gatherOdds: 's', gatherNoBreaks: 'b' };
+  const UI_KEYS = { tab: 's', goal: 's', metric: 's', per: 's', prof: 's', crafts: 's', wanted: 's', planGather: 'b', priceSort: 's', priceFilter: 's', rankAll: 'b', canCraft: 'b', recProf: 's', recSrc: 's', budget: 's', affordOnly: 'b', gatherShow: 's', gatherOdds: 's', gatherNoBreaks: 'b', ckChar: 's' };
   function readUI() {
     try {
       const x = JSON.parse(localStorage.getItem(LS_UI) || '{}') || {};
@@ -3114,7 +3114,174 @@
     return h;
   }
 
-  const VIEWS = { rank: rankView, gather: gatherView, recipes: recipesView, prices: pricesView, shots: shotsView, settings: settingsView };
+  /* ---------- checklist ---------- */
+  // Dailies and weeklies per character. A task counts what's done since its last reset, so nothing needs
+  // clearing: last week's ticks just stop counting. Signed in, it's kept in checklist/{uid}, private to
+  // you; otherwise in this browser.
+  // The default tasks for the Global servers in Season 1, from community guides; anyone can hide ones
+  // that don't apply and add their own. max 1 is a tick box, more is a counter.
+  const CK_TASKS = [
+    { id: 'duty', name: 'Duty Missions', every: 'day', max: 5, note: 'From the journal (J). Reroll weak rewards for Kina.' },
+    { id: 'nightmare', name: 'Nightmare', every: 'day', max: 2, note: 'Two entries a day, banking up to 14, so a missed day isn’t lost.' },
+    { id: 'conquest', name: 'Conquest', every: 'day', max: 3, note: 'A reward count every 8 hours, banking up to 21.' },
+    { id: 'transcend', name: 'Transcendence', every: 'day', max: 2, note: 'A reward count every 12 hours, banking up to 14. Needs item level 1,600.' },
+    { id: 'shugo', name: 'Shugo Festival keys', every: 'day', max: 3, note: 'Three keys a day, banking up to 12 (21 with membership). Shared by your characters on a server.' },
+    { id: 'invasion', name: 'Dimensional Invasion key', every: 'day', max: 1, note: 'One a day, banking up to 7. Shared on a server.' },
+    { id: 'odyle', name: 'Spend Odyle Energy', every: 'day', max: 1, note: '+15 every 3 hours, up to 560 (840 with membership). Spend it before it caps.' },
+    { id: 'ddungeon', name: 'Daily dungeon', every: 'week', max: 14, note: 'Unknown Fissure and Daeva Bio-Research Base: 14 entries a week from level 30, shared on a server.' },
+    { id: 'ascension', name: 'Ascension Trial', every: 'week', max: 3, note: 'Solo. Dying loses the reward.' },
+    { id: 'subjugation', name: 'Subjugation', every: 'week', max: 3 },
+    { id: 'sanctuary', name: 'Sanctuary raids', every: 'week', max: 1, note: 'Four attempts a raid. Ludra’s final boss once a week, the other two twice.' },
+    { id: 'expedition', name: 'Expedition rewards', every: 'week', max: 1, note: 'Seven reward counts in each Expedition dungeon.' },
+    { id: 'abyss', name: 'Abyss hours', every: 'week', max: 1, note: 'Seven hours each in Lower, Middle and Upper Reshanta (14 in Lower and Middle with membership). From level 45.' },
+    { id: 'growth', name: 'Growth dungeons', every: 'week', max: 1, note: 'Silent Graveyard and Fafnite Amphitheater: seven hours each, counted only while inside.' },
+    { id: 'supply', name: 'Supply requests', every: 'week', max: 1, note: 'Abyss Points without PvP.' },
+    { id: 'scrolls', name: 'Command scrolls', every: 'week', max: 1, note: 'Buy all 12 before the reset; they can be used later.' },
+    { id: 'energy', name: 'Weekly Odyle Energy from the vendor', every: 'week', max: 1, note: 'On every character, alts too.' },
+    { id: 'stigma', name: 'Abyss shop: stigma shards', every: 'week', max: 1 },
+    { id: 'pass', name: 'Daeva Pass and Season Mission', every: 'week', max: 1, note: 'Pass EXP and season points are capped each week.' }
+  ];
+  const CK_DAY = 864e5, CK_WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const LS_CK = 'kina-ledger:checklist:v1', CK_ID = /^[a-z]_[a-z0-9]{4,24}$/;
+  // reset: the hour (UTC) of the daily reset and the weekday (UTC) of the weekly one. Every Global server
+  // resets at 07:00 UTC (16:00 in Korea), the week on Wednesday.
+  function ckEmpty() { return { chars: [{ id: 'c_main1', name: 'Main' }], custom: [], hide: [], done: {}, reset: { hour: 7, wday: 3 } }; }
+  function readChecklist(x) {
+    const o = ckEmpty();
+    if (!x || typeof x !== 'object') return o;
+    const str = (v, n) => typeof v === 'string' ? v.replace(/[\u0000-\u001f]/g, '').trim().slice(0, n) : '';
+    if (Array.isArray(x.chars)) {
+      const chars = x.chars.filter(c => c && CK_ID.test(c.id) && str(c.name, 40)).slice(0, 20).map(c => ({ id: c.id, name: str(c.name, 40) }));
+      if (chars.length) o.chars = chars;
+    }
+    if (Array.isArray(x.custom)) o.custom = x.custom.filter(t => t && CK_ID.test(t.id) && str(t.name, 60) && (t.every === 'day' || t.every === 'week')).slice(0, 50)
+      .map(t => ({ id: t.id, name: str(t.name, 60), every: t.every, max: Math.min(99, Math.max(1, Math.round(num(t.max) || 1))) }));
+    if (Array.isArray(x.hide)) o.hide = x.hide.filter(id => typeof id === 'string' && id.length <= 30).slice(0, 100);
+    if (x.reset && typeof x.reset === 'object') {
+      const h = num(x.reset.hour), w = num(x.reset.wday);
+      if (h >= 0 && h <= 23) o.reset.hour = Math.round(h);
+      if (w >= 0 && w <= 6) o.reset.wday = Math.round(w);
+    }
+    if (x.done && typeof x.done === 'object') for (const cid of Object.keys(x.done)) {
+      if (!o.chars.some(c => c.id === cid) || !x.done[cid] || typeof x.done[cid] !== 'object') continue;
+      const m = {};
+      for (const tid of Object.keys(x.done[cid])) {
+        const e = x.done[cid][tid], n = num(e && e.n), at = num(e && e.at);
+        if (n > 0 && n < 1000 && at > 0) m[tid] = { n: Math.round(n), at: at };
+      }
+      o.done[cid] = m;
+    }
+    return o;
+  }
+  function ckLocal() { try { return readChecklist(JSON.parse(localStorage.getItem(LS_CK) || 'null')); } catch (_) { return ckEmpty(); } }
+  // Kept in the price book once it's loaded and allowed; in this browser until then, or if Firestore still
+  // has the older rules.
+  function ckShared() { return !!(S.uid && DB && S.ckState === 'ok'); }
+  function myChecklist() { return ckShared() ? (S.ck || ckEmpty()) : ckLocal(); }
+  function ckTasks(ck) { return CK_TASKS.concat(ck.custom.map(t => Object.assign({ mine: true }, t))); }
+  // The start of the current day and week, and when the next ones begin.
+  function ckResets(ck, now) {
+    const t = now || Date.now(), d = new Date(t), r = ck.reset;
+    let day = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), r.hour);
+    if (day > t) day -= CK_DAY;
+    let week = day;
+    while (new Date(week).getUTCDay() !== r.wday) week -= CK_DAY;
+    return { day: day, week: week, nextDay: day + CK_DAY, nextWeek: week + 7 * CK_DAY };
+  }
+  // How many of a task a character has done since its reset.
+  function ckCount(ck, cid, task, rs) {
+    const e = ck.done[cid] && ck.done[cid][task.id];
+    return e && e.at >= (task.every === 'day' ? rs.day : rs.week) ? Math.min(task.max, e.n) : 0;
+  }
+  // Saves, keeping only ticks that still count.
+  function setChecklist(ck) {
+    const rs = ckResets(ck), tasks = new Map(ckTasks(ck).map(t => [t.id, t])), done = {};
+    for (const c of ck.chars) {
+      const m = {};
+      for (const tid of Object.keys(ck.done[c.id] || {})) {
+        const t = tasks.get(tid), e = ck.done[c.id][tid];
+        if (t && e.n > 0 && e.at >= (t.every === 'day' ? rs.day : rs.week)) m[tid] = { n: e.n, at: e.at };
+      }
+      if (Object.keys(m).length) done[c.id] = m;
+    }
+    const body = clean({ chars: ck.chars, custom: ck.custom, hide: ck.hide, done: done, reset: ck.reset });
+    if (ckShared()) { S.ck = readChecklist(body); dbWrite('checklist/' + S.uid, Object.assign(body, { at: Date.now() })); }
+    else try { localStorage.setItem(LS_CK, JSON.stringify(body)); } catch (_) { toast('This browser didn’t keep the change.'); }
+  }
+  function ckBump(ck, tid, by) {
+    const task = ckTasks(ck).find(x => x.id === tid), c = ckChar(ck);
+    if (!task || !c) return;
+    const n = Math.max(0, Math.min(task.max, ckCount(ck, c.id, task, ckResets(ck)) + by)), m = ck.done[c.id] || (ck.done[c.id] = {});
+    if (n) m[tid] = { n: n, at: Date.now() }; else delete m[tid];
+  }
+  function ckEdit(fn) { const ck = myChecklist(); fn(ck); setChecklist(ck); render(); }
+  function ckChar(ck) { return ck.chars.find(c => c.id === UI.ckChar) || ck.chars[0]; }
+  function ckLeft(ms) {
+    const m = Math.max(0, Math.round(ms / 60000)), d = Math.floor(m / 1440), h = Math.floor(m / 60) % 24, mm = m % 60;
+    return d ? d + ' d ' + h + ' h' : h ? h + ' h ' + mm + ' min' : mm + ' min';
+  }
+  function ckResetTxt(ck) {
+    const rs = ckResets(ck), now = Date.now();
+    const at = (t, wd) => new Date(t).toLocaleString(undefined, Object.assign(wd ? { weekday: 'short' } : {}, { hour: 'numeric', minute: '2-digit' }));
+    return 'Daily reset in ' + ckLeft(rs.nextDay - now) + ' (' + at(rs.nextDay) + ') · Weekly reset in ' + ckLeft(rs.nextWeek - now) + ' (' + at(rs.nextWeek, true) + ')';
+  }
+  function checklistView() {
+    const ck = myChecklist(), rs = ckResets(ck), cur = ckChar(ck), tasks = ckTasks(ck), edit = !!UI.ckEdit;
+    const shown = tasks.filter(t => !ck.hide.includes(t.id));
+    const tally = (cid, every) => { const list = shown.filter(t => t.every === every); return list.filter(t => ckCount(ck, cid, t, rs) >= t.max).length + '/' + list.length; };
+    let h = '<section class="panel"><div class="toolbar"><h2 class="sec-h">Checklist</h2><span class="help" id="ck-resets">' + esc(ckResetTxt(ck)) + '</span></div>';
+    if (S.uid && S.ckState === 'denied') h += '<p class="note loss">Firestore turned down your checklist: it still has the older rules. It’s kept in this browser for now. ' + (canManage() ? 'Publish the new <strong>firestore.rules</strong>, then reload.' : 'Let the owner know the price book’s rules need updating.') + '</p>';
+    h += '<div class="ck-chars" role="group" aria-label="Character">' + ck.chars.map(c => '<button class="ck-char" data-act="ck-char" data-c="' + esc(c.id) + '" aria-pressed="' + (c.id === cur.id) + '"><strong>' + esc(c.name) + '</strong>' +
+      '<span>daily ' + tally(c.id, 'day') + ' · weekly ' + tally(c.id, 'week') + '</span></button>').join('') + '</div>';
+    const row = t => {
+      const n = ckCount(ck, cur.id, t, rs), full = n >= t.max, hid = ck.hide.includes(t.id), key = esc(t.id);
+      if (edit) {
+        return '<li class="ck-row' + (hid ? ' ck-off' : '') + '"><label class="check"><input type="checkbox" data-chg="ck-show" data-t="' + key + '"' + (hid ? '' : ' checked') + '> ' + esc(t.name) + (t.max > 1 ? ' <span class="help">×' + t.max + '</span>' : '') + '</label>' +
+          (t.mine ? '<button class="btn small ghost danger' + (UI.confirm === 'ckdel-' + t.id ? ' armed' : '') + '" data-act="ck-del-task" data-t="' + key + '">' + (UI.confirm === 'ckdel-' + t.id ? 'Click again to delete' : 'Delete') + '</button>' : '') + '</li>';
+      }
+      const ctl = t.max > 1
+        ? '<div class="ck-count"><button class="btn small" data-act="ck-dec" data-t="' + key + '"' + (n ? '' : ' disabled') + ' aria-label="One less ' + esc(t.name) + '">−</button><span class="ck-n">' + n + ' / ' + t.max + '</span>' +
+          '<button class="btn small" data-act="ck-inc" data-t="' + key + '"' + (full ? ' disabled' : '') + ' aria-label="One more ' + esc(t.name) + '">+</button></div>'
+        : '';
+      return '<li class="ck-row' + (full ? ' ck-done' : '') + '"><div class="ck-main">' + (t.max > 1 ? '<span class="ck-name">' + esc(t.name) + '</span>'
+          : '<label class="check ck-name"><input type="checkbox" data-chg="ck-tick" data-t="' + key + '"' + (full ? ' checked' : '') + '> ' + esc(t.name) + '</label>') + ctl + '</div>' +
+        (t.note ? '<p class="help">' + esc(t.note) + '</p>' : '') + '</li>';
+    };
+    const list = (every, title) => {
+      const items = (edit ? tasks : shown).filter(t => t.every === every);
+      return '<div class="ck-col"><h3 class="ck-h">' + title + (edit ? '' : ' <span class="help">' + tally(cur.id, every).replace('/', ' of ') + ' done</span>') + '</h3>' +
+        (items.length ? '<ul class="ck-list">' + items.map(row).join('') + '</ul>' : '<p class="help">Nothing here. Add a task below.</p>') + '</div>';
+    };
+    h += '<div class="ck-grid">' + list('day', 'Daily') + list('week', 'Weekly') + '</div>';
+    if (edit) {
+      const d = UI.ckDraft || { name: '', every: 'day', max: '1' };
+      h += '<div class="ck-edit"><h3 class="ck-h">Your own task</h3><div class="row-gap"><input class="in" id="ck-new" data-inp="ck-draft" data-k="name" value="' + esc(d.name) + '" placeholder="e.g. Legion quests" maxlength="60" aria-label="Task">' +
+        '<select class="in" data-chg="ck-draft-every" aria-label="How often"><option value="day"' + (d.every === 'day' ? ' selected' : '') + '>Daily</option><option value="week"' + (d.every === 'week' ? ' selected' : '') + '>Weekly</option></select>' +
+        '<input class="in num ck-max" data-inp="ck-draft" data-k="max" value="' + esc(d.max) + '" inputmode="numeric" maxlength="2" aria-label="How many times"><button class="btn" data-act="ck-add-task">Add</button></div>' +
+        '<h3 class="ck-h">Characters</h3><ul class="ck-list">' + ck.chars.map(c => '<li class="ck-row"><div class="ck-main"><input class="in" data-chg="ck-rename" data-c="' + esc(c.id) + '" value="' + esc(c.name) + '" maxlength="40" aria-label="Name of ' + esc(c.name) + '">' +
+          (ck.chars.length > 1 ? '<button class="btn small ghost danger' + (UI.confirm === 'ckchar-' + c.id ? ' armed' : '') + '" data-act="ck-del-char" data-c="' + esc(c.id) + '">' + (UI.confirm === 'ckchar-' + c.id ? 'Click again to remove' : 'Remove') + '</button>' : '') + '</div></li>').join('') + '</ul>' +
+        '<div class="row-gap"><input class="in" id="ck-char-new" data-inp="ck-char-draft" value="' + esc(UI.ckCharDraft || '') + '" placeholder="Character name" maxlength="40" aria-label="New character"><button class="btn" data-act="ck-add-char"' + (ck.chars.length >= 20 ? ' disabled' : '') + '>Add character</button></div>' +
+        '<h3 class="ck-h">Reset time</h3><div class="row-gap"><label class="help" for="ck-hour">Daily at</label><select class="in" id="ck-hour" data-chg="ck-reset-hour">' +
+          Array.from({ length: 24 }, (_, i) => '<option value="' + i + '"' + (i === ck.reset.hour ? ' selected' : '') + '>' + String(i).padStart(2, '0') + ':00 UTC</option>').join('') + '</select>' +
+        '<label class="help" for="ck-wday">weekly on</label><select class="in" id="ck-wday" data-chg="ck-reset-wday">' + CK_WEEKDAYS.map((w, i) => '<option value="' + i + '"' + (i === ck.reset.wday ? ' selected' : '') + '>' + w + '</option>').join('') + '</select></div>' +
+        '<p class="help">Every Global server resets at 07:00 UTC (16:00 in Korea), the week on Wednesday. That’s ' + esc(new Date(Date.UTC(2026, 0, 7, ck.reset.hour)).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })) + ' your time.</p></div>';
+    }
+    h += '<div class="row-gap"><button class="btn' + (edit ? ' primary' : '') + '" data-act="ck-edit">' + (edit ? 'Done editing' : 'Edit the list') + '</button></div>' +
+      '<p class="note">Ticks clear themselves at each reset. The tasks come from community guides for the Global servers in Season 1, so hide what doesn’t apply to you and add your own. ' +
+      (S.uid ? 'Your checklist is yours alone and follows you to any device you sign in on.' : 'It’s kept in this browser.') + '</p></section>';
+    return h;
+  }
+  // Keeps the countdown current, and redraws when a reset passes.
+  let ckShownDay = 0;
+  setInterval(() => {
+    if (UI.tab !== 'check') return;
+    const ck = myChecklist(), rs = ckResets(ck), el = document.getElementById('ck-resets');
+    if (ckShownDay && rs.day !== ckShownDay) { ckShownDay = rs.day; scheduleRender(); return; }
+    ckShownDay = rs.day;
+    if (el) el.textContent = ckResetTxt(ck);
+  }, 30000);
+
+  const VIEWS = { rank: rankView, gather: gatherView, recipes: recipesView, prices: pricesView, shots: shotsView, check: checklistView, settings: settingsView };
 
   function render() {
     const a = document.activeElement;
@@ -3286,6 +3453,9 @@
       if (f && !have.some(x => x.f === f && x.t === r.t)) runs.push(Object.assign({ f: f, m: r.m, n: n, t: r.t }, r.st ? { st: r.st } : {}));
     }
     if (runs.length) setRuns(have.concat(runs));
+    // A checklist comes in only over an untouched one.
+    const ckNow = myChecklist();
+    if (d.myChecklist && typeof d.myChecklist === 'object' && ckNow.chars.length === 1 && ckNow.chars[0].id === 'c_main1' && !ckNow.custom.length && !ckNow.hide.length) setChecklist(readChecklist(d.myChecklist));
     const hadCrafts = myCrafts(), crafts = readCrafts(d.myCrafts).filter(c => getRecipe(c.r) && !hadCrafts.some(x => x.r === c.r && x.t === c.t));
     if (crafts.length) setCrafts(hadCrafts.concat(crafts));
     if (num(d.myCraftMin) > 0) setCraftMin(num(d.myCraftMin));
@@ -3349,6 +3519,35 @@
       if (!liveKinds().every(x => x.k.f)) { toast('Choose a node for each icon first.'); return; }
       if (S.mode === 'db' && LIVE.problems.some(p => p.send && !p.sent) && !arm('live-save')) return;
       liveSave(); liveReset(); render();
+    },
+    'ck-char': t => { UI.ckChar = t.dataset.c; saveUI(); render(); },
+    'ck-inc': t => ckEdit(ck => ckBump(ck, t.dataset.t, 1)),
+    'ck-dec': t => ckEdit(ck => ckBump(ck, t.dataset.t, -1)),
+    'ck-edit': () => { UI.ckEdit = !UI.ckEdit; render(); },
+    'ck-add-task': () => {
+      const d = Object.assign({ name: '', every: 'day', max: '1' }, UI.ckDraft), name = String(d.name).trim(), max = Math.round(num(d.max) || 0);
+      if (!name) { toast('Name the task first.'); return; }
+      if (!(max >= 1 && max <= 99)) { toast('How many times: 1 to 99.'); return; }
+      if (myChecklist().custom.length >= 50) { toast('That’s 50 of your own tasks already.'); return; }
+      UI.ckDraft = { name: '', every: d.every, max: '1' };
+      ckEdit(ck => { ck.custom.push({ id: uid('u'), name: name.slice(0, 60), every: d.every === 'week' ? 'week' : 'day', max: max }); });
+    },
+    'ck-del-task': t => {
+      const id = t.dataset.t;
+      if (!arm('ckdel-' + id)) return;
+      ckEdit(ck => { ck.custom = ck.custom.filter(x => x.id !== id); ck.hide = ck.hide.filter(x => x !== id); });
+    },
+    'ck-add-char': () => {
+      const name = String(UI.ckCharDraft || '').trim();
+      if (!name) { toast('Type the character’s name first.'); return; }
+      const id = uid('c');
+      UI.ckCharDraft = ''; UI.ckChar = id; saveUI();
+      ckEdit(ck => { if (ck.chars.length < 20) ck.chars.push({ id: id, name: name.slice(0, 40) }); });
+    },
+    'ck-del-char': t => {
+      const id = t.dataset.c;
+      if (!arm('ckchar-' + id)) return;
+      ckEdit(ck => { if (ck.chars.length > 1) { ck.chars = ck.chars.filter(c => c.id !== id); delete ck.done[id]; } });
     },
     'live-report': () => {
       if (!LIVE.worker) return;
@@ -3458,7 +3657,7 @@
     'paste-clear': () => { UI.shots.pasteText = ''; UI.shots.pasteNote = ''; if (UI.shots.source === 'paste') UI.shots.market = null; render(); },
     'shot-discard': () => { UI.shots.market = null; UI.shots.error = ''; render(); },
     'shot-apply': () => applyMarket(),
-    'io-export': () => { UI.io.exportText = JSON.stringify({ app: 'kina-ledger', version: 3, exportedAt: new Date().toISOString(), settings: S.settings, myLevels: myLevels(), myGather: S.uid ? [...myGather()] : null, myRuns: myRuns(), myCrafts: myCrafts(), myCraftMin: myCraftMin(), items: [...S.items.values()], recipes: [...S.recipes.values()] }, null, 2); render(); },
+    'io-export': () => { UI.io.exportText = JSON.stringify({ app: 'kina-ledger', version: 3, exportedAt: new Date().toISOString(), settings: S.settings, myLevels: myLevels(), myGather: S.uid ? [...myGather()] : null, myRuns: myRuns(), myCrafts: myCrafts(), myCraftMin: myCraftMin(), myChecklist: myChecklist(), items: [...S.items.values()], recipes: [...S.recipes.values()] }, null, 2); render(); },
     'io-hide': () => { UI.io.exportText = ''; render(); },
     'io-copy': () => {
       const fallback = () => { const ta = document.getElementById('io-out'); if (ta) { ta.focus(); ta.select(); } toast('Press Ctrl+C to copy the selected text.'); };
@@ -3510,6 +3709,16 @@
       toast(t.checked ? 'Your gathering totals are shared with the group, with no names.' : 'Your gathering totals aren’t shared any more. How often nodes open at each grade still is, for everyone’s odds.');
       render();
     },
+    'ck-tick': t => ckEdit(ck => ckBump(ck, t.dataset.t, t.checked ? 1 : -1)),
+    'ck-show': t => ckEdit(ck => { const id = t.dataset.t; ck.hide = ck.hide.filter(x => x !== id); if (!t.checked) ck.hide.push(id); }),
+    'ck-draft-every': t => { UI.ckDraft = Object.assign({ name: '', max: '1' }, UI.ckDraft, { every: t.value }); },
+    'ck-rename': t => {
+      const name = t.value.trim().slice(0, 40);
+      if (!name) { render(); return; }
+      ckEdit(ck => { const c = ck.chars.find(x => x.id === t.dataset.c); if (c) c.name = name; });
+    },
+    'ck-reset-hour': t => ckEdit(ck => { ck.reset.hour = Math.min(23, Math.max(0, +t.value || 0)); }),
+    'ck-reset-wday': t => ckEdit(ck => { ck.reset.wday = Math.min(6, Math.max(0, +t.value || 0)); }),
     'live-limit': t => {
       const v = Math.round(num(t.value) || 0);
       LIVE.limit = v >= 1 && v <= 600 ? v : 0;
@@ -3555,6 +3764,8 @@
   };
 
   const INPUTS = {
+    'ck-draft': t => { UI.ckDraft = Object.assign({ name: '', every: 'day', max: '1' }, UI.ckDraft, { [t.dataset.k]: t.value }); },
+    'ck-char-draft': t => { UI.ckCharDraft = t.value; },
     ed: t => {
       UI.editor[t.dataset.k] = t.value;
       if (t.dataset.k === 'level' || t.dataset.k === 'profession' || t.dataset.k === 'grade') {
@@ -3646,7 +3857,7 @@
   function useLocal() {
     for (const stop of unsubs) stop();
     unsubs = [];
-    DB = null; S.mode = 'local'; S.role = 'owner'; S.uid = null; S.mine = null; S.myGather = null; S.myRuns = null; S.myCrafts = null; S.myCraftMin = null; S.pool = new Map(); S.poolLoaded = false; poolSent = '';
+    DB = null; S.mode = 'local'; S.role = 'owner'; S.uid = null; S.mine = null; S.myGather = null; S.myRuns = null; S.myCrafts = null; S.myCraftMin = null; S.pool = new Map(); S.poolLoaded = false; poolSent = ''; S.ck = null; S.ckState = null;
     S.items = new Map(); S.recipes = new Map(); S.settings = mergeSettings(null);
     loadLocal();
     itemsVer++; recipesVer++;
@@ -3664,10 +3875,19 @@
     for (const stop of unsubs) stop();
     unsubs = [];
     S.auth = 'member'; S.role = member.role === 'owner' ? 'owner' : 'member';
-    DB = fs; S.mode = 'db'; S.uid = user.uid; S.mine = null; S.myGather = null; S.myRuns = null; S.myCrafts = null; S.myCraftMin = null; S.pool = new Map(); S.poolLoaded = false; poolSent = ''; S.ready = false;
+    DB = fs; S.mode = 'db'; S.uid = user.uid; S.mine = null; S.myGather = null; S.myRuns = null; S.myCrafts = null; S.myCraftMin = null; S.pool = new Map(); S.poolLoaded = false; poolSent = ''; S.ck = null; S.ckState = 'loading'; S.ready = false;
     S.items = new Map(); S.recipes = new Map();
     render();
     subscribe();
+    unsubs.push(DB.doc('checklist/' + user.uid).onSnapshot(d => {
+      const first = S.ckState !== 'ok';
+      S.ckState = 'ok';
+      S.ck = d.exists ? readChecklist(d.data()) : ckEmpty();
+      let local = null;
+      try { local = localStorage.getItem(LS_CK); } catch (_) {}
+      if (first && !d.exists && local) setChecklist(ckLocal());
+      scheduleRender();
+    }, () => { S.ckState = 'denied'; scheduleRender(); }));
     unsubs.push(DB.collection('pool').limit(200).onSnapshot(snap => {
       S.pool = new Map(snap.docs.map(d => [d.id, readPool(d.data())]));
       if (!S.poolLoaded) { S.poolLoaded = true; writePool(); }

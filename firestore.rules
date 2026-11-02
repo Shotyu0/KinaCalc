@@ -91,6 +91,20 @@ service cloud.firestore {
         && optTime(request.resource.data, 'at');
     }
 
+    // Each member's daily and weekly checklist: their characters, what's done since the last reset, the
+    // tasks they hid or added, and the reset time. Private to them.
+    match /checklist/{uid} {
+      allow read: if isMember() && request.auth.uid == uid;
+      allow write: if isMember() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['chars', 'custom', 'hide', 'done', 'reset', 'at'])
+        && (!('chars' in request.resource.data) || (request.resource.data.chars is list && request.resource.data.chars.size() <= 20))
+        && (!('custom' in request.resource.data) || (request.resource.data.custom is list && request.resource.data.custom.size() <= 50))
+        && (!('hide' in request.resource.data) || (request.resource.data.hide is list && request.resource.data.hide.size() <= 100))
+        && (!('done' in request.resource.data) || (request.resource.data.done is map && request.resource.data.done.size() <= 20))
+        && (!('reset' in request.resource.data) || request.resource.data.reset is map)
+        && optTime(request.resource.data, 'at');
+    }
+
     // Problem reports from the live gathering tracker: a picture of the popup frames and what was read.
     // Members send them under their own address; only the owner reads or deletes them.
     match /reports/{id} {
