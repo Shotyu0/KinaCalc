@@ -70,7 +70,7 @@
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
   let GATHERABLE = null; // names of materials gathered from nodes, from data/gather-icons.json
-  const BUILD = '2026-11-02a'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-11-15a'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -147,7 +147,7 @@
     }
     return s;
   }
-  const UI_KEYS = { tab: 's', goal: 's', metric: 's', per: 's', prof: 's', crafts: 's', wanted: 's', planGather: 'b', priceSort: 's', priceFilter: 's', rankAll: 'b', canCraft: 'b', recProf: 's', recSrc: 's', budget: 's', affordOnly: 'b', gatherShow: 's', gatherOdds: 's', gatherNoBreaks: 'b', ckChar: 's' };
+  const UI_KEYS = { tab: 's', goal: 's', metric: 's', per: 's', prof: 's', crafts: 's', wanted: 's', planGather: 'b', priceSort: 's', priceFilter: 's', rankAll: 'b', canCraft: 'b', recProf: 's', recSrc: 's', budget: 's', affordOnly: 'b', gatherShow: 's', gatherOdds: 's', gatherNoBreaks: 'b', ckChar: 's', alertSeen: 's' };
   function readUI() {
     try {
       const x = JSON.parse(localStorage.getItem(LS_UI) || '{}') || {};
@@ -486,7 +486,7 @@
   function readMats(a) { return Array.isArray(a) ? a.filter(m => m && m.item).map(m => ({ item: String(m.item), qty: num(m.qty) || 0 })) : []; }
   function readItem(id, x) {
     x = x || {};
-    const it = { id: id, name: String(x.name == null ? id : x.name).trim(), price: num(x.price), vendor: num(x.vendor), gather: !!x.gather, bound: !!x.bound, unavailable: !!x.unavailable, updatedAt: num(x.updatedAt), hist: readHist(x.hist), example: !!x.example };
+    const it = { id: id, name: String(x.name == null ? id : x.name).trim(), price: num(x.price), vendor: num(x.vendor), gather: !!x.gather, bound: !!x.bound, unavailable: !!x.unavailable, updatedAt: num(x.updatedAt), hist: readHist(x.hist).slice(-HIST_MAX), example: !!x.example };
     // The item's 9-digit key on aion2.exchange, learned from a pasted table. Left off when unknown.
     if (MARKET_KEY.test(x.marketKey)) it.marketKey = x.marketKey;
     return it;
@@ -601,9 +601,9 @@
     if (pi.doubtful) {
       return '<div class="sub stale" title="' + esc(doubtText(pi.latest, pi.usual)) + '">' + esc(prefix || '') + k(pi.latest) + ' looks wrong · using ' + k(pi.usual) + '</div>';
     }
-    const old = !it.updatedAt || Date.now() - it.updatedAt > DAY;
-    return '<div class="sub' + (old ? ' stale' : '') + '" title="' + esc(it.updatedAt ? 'Updated ' + when(it.updatedAt) : 'No date recorded') + '">' +
-      esc(prefix || '') + k(it.price) + ' · ' + (it.updatedAt ? ago(it.updatedAt) : 'no date') + '</div>';
+    const seen = seenAt(it), old = !seen || Date.now() - seen > DAY;
+    return '<div class="sub' + (old ? ' stale' : '') + '" title="' + esc(seen ? 'Current as of ' + when(seen) : 'No date recorded') + '">' +
+      esc(prefix || '') + k(it.price) + ' · ' + (seen ? ago(seen) : 'no date') + '</div>';
   }
   function doubtText(price, usual) {
     return price >= usual ? NF0.format(Math.round(price / usual)) + '× its usual ' + k(usual) : 'under a fifth of its usual ' + k(usual);
@@ -646,8 +646,9 @@
   }
   function priceAge(id) {
     const it = getItem(id);
-    if (!it || !it.updatedAt) return '';
-    return '<div class="sub' + (Date.now() - it.updatedAt > DAY ? ' stale' : '') + '">' + ago(it.updatedAt) + '</div>';
+    const seen = seenAt(it);
+    if (!seen) return '';
+    return '<div class="sub' + (Date.now() - seen > DAY ? ' stale' : '') + '">' + ago(seen) + '</div>';
   }
   // How much of a craft's expected sales come from its Splendent proc, and what it would make without it.
   function comboShare(rc) {
@@ -1084,7 +1085,8 @@
 
   function renderChrome() {
     document.getElementById('tabs').innerHTML = TABS.map(([id, label]) =>
-      '<button class="tab" role="tab" id="tab-' + id + '" aria-selected="' + (UI.tab === id) + '" data-act="tab" data-tab="' + id + '">' + label + '</button>').join('');
+      '<button class="tab" role="tab" id="tab-' + id + '" aria-selected="' + (UI.tab === id) + '" data-act="tab" data-tab="' + id + '">' + label +
+      (id === 'prices' && UI.tab !== 'prices' && unseenHits() ? ' <span class="tab-n" aria-label="' + plural(unseenHits(), 'price alert') + ' went off">' + unseenHits() + '</span>' : '') + '</button>').join('');
     const st = document.getElementById('status'), btn = document.getElementById('acct-btn');
     let cls = '', txt = 'Connecting…';
     if (S.mode === 'db') { cls = 'ok'; txt = S.role === 'owner' ? 'Shared price book · owner' : 'Shared price book'; }
@@ -1266,7 +1268,7 @@
     const now = Date.now();
     for (const it of S.items.values()) {
       if (num(it.price) > 0 || num(it.vendor) > 0) priced++;
-      if (num(it.price) > 0 && it.updatedAt && now - it.updatedAt > DAY) stale++;
+      if (num(it.price) > 0 && seenAt(it) && now - seenAt(it) > DAY) stale++;
     }
     const need = neededPrices(C);
     const total = allItems().length;
@@ -1380,11 +1382,11 @@
     }
     const cshare = comboShare(rc);
     if (cshare) {
-      const ci = getItem(rc.comboId), old = ci && (!ci.updatedAt || Date.now() - ci.updatedAt > DAY);
+      const ci = getItem(rc.comboId), ciSeen = seenAt(ci), old = ci && (!ciSeen || Date.now() - ciSeen > DAY);
       odds += '<dt>Sales from the Splendent</dt><dd>' + pct(cshare.share, 0) + '</dd><dd class="why">' +
         (cshare.driven ? 'Most of this craft’s profit comes from the occasional ' + esc(comboName) + ', so its price matters most. ' : '') +
-        'Without Splendent procs it would make ' + sk(cshare.without) + ' per attempt. The Splendent price, ' + k(ci && ci.price) + ', was entered ' +
-        (ci && ci.updatedAt ? ago(ci.updatedAt) : 'at an unknown time') + (old ? '. Paste a fresh price if it looks off.' : '.') + '</dd>';
+        'Without Splendent procs it would make ' + sk(cshare.without) + ' per attempt. The Splendent price, ' + k(ci && ci.price) + ', is from ' +
+        (ciSeen ? ago(ciSeen) : 'at an unknown time') + (old ? '. Paste a fresh price if it looks off.' : '.') + '</dd>';
     }
     if (r.transfer && r.transfer.length) {
       odds += '<dt>Transfer Crafting</dt><dd>100%</dd><dd class="why">Turns a ' + esc(outName) + ' you own into ' + (rc.sameCombo ? 'its Splendent version' : esc(comboName)) + ' with ' +
@@ -1709,7 +1711,7 @@
     else if (UI.priceFilter === 'gather') items = items.filter(isGathered);
     if (q) items = items.filter(it => loose(it.name).indexOf(q) >= 0);
     const byName = (a, b) => a.name.localeCompare(b.name);
-    if (UI.priceSort === 'stale') items.sort((a, b) => ((a.updatedAt || 0) - (b.updatedAt || 0)) || byName(a, b));
+    if (UI.priceSort === 'stale') items.sort((a, b) => ((seenAt(a) || 0) - (seenAt(b) || 0)) || byName(a, b));
     else if (UI.priceSort === 'used') items.sort((a, b) => ((used.get(b.id) || 0) - (used.get(a.id) || 0)) || byName(a, b));
     else items.sort(byName);
     return items;
@@ -1722,6 +1724,8 @@
     const now = Date.now();
     let h = '<div class="toolbar"><h2 class="sec-h">Prices</h2><div class="row-gap"><button class="btn" data-act="tab" data-tab="shots">Paste a price list</button></div></div>' +
       '<p class="help">Enter the lowest market price for one unit. You can type 1520, 1,520 or 1.5k. Every price you enter or paste is kept, so click an item’s name to see its price history. Tick <strong>Gather</strong> for anything you collect yourself' + (S.uid ? ' (your own list: friends tick theirs)' : '') + ', and <strong>Bound</strong> for items that can’t be sold on the market. Use the NPC column for vendor-only materials.</p>';
+    h += alertsPanel();
+    markHitsSeen();
     h += '<section class="panel"><div class="addrow">' +
       '<input id="ni-name" class="in" list="dl-items" placeholder="New item name" value="' + esc(UI.newItem.name) + '" data-inp="ni" data-k="name" aria-label="New item name" autocomplete="off">' +
       '<input id="ni-price" class="in num" inputmode="decimal" placeholder="Market price" value="' + esc(UI.newItem.price) + '" data-inp="ni" data-k="price" aria-label="New item market price">' +
@@ -1746,7 +1750,8 @@
       if (reg().unavail.has(it.id)) tags.push(['warn', 'Not in game']);
       if (priceInfo(it).doubtful) tags.push(['loss', 'Doubtful price']);
       else if (needsPrice(it, used, C, outputs)) tags.push(['warn', 'Needs a price']);
-      const isStale = num(it.price) > 0 && it.updatedAt && now - it.updatedAt > DAY;
+      if (S.alerts && S.alerts.rules[it.id]) tags.push(['', 'Alert at ' + alertText(S.alerts.rules[it.id])]);
+      const seen = seenAt(it), isStale = num(it.price) > 0 && seen && now - seen > DAY;
       const deletable = !it.virtual && !u && !reg().catNames.has(norm(it.name));
       h += '<tr class="' + (open ? 'open' : '') + '"><td class="c-name"><button class="name-btn" data-act="price-open" data-id="' + id + '" aria-expanded="' + open + '">' + nameHTML(it.id) + '</button>' + tagList(tags) + '</td>' +
         '<td class="num"><input id="pi-price-' + id + '" class="cell-in num" inputmode="decimal" value="' + (it.price != null ? NF0.format(it.price) : '') + '" placeholder="—" data-chg="item" data-id="' + id + '" data-f="price" aria-label="Market price of ' + esc(it.name) + '"' + (it.bound ? ' disabled title="Bound items can’t be sold on the market"' : '') + '></td>' +
@@ -1755,7 +1760,7 @@
         '<td class="c"><input type="checkbox" class="check" id="pi-gather-' + id + '" data-chg="item" data-id="' + id + '" data-f="gather"' + (isGathered(it) ? ' checked' : '') + ' aria-label="I gather ' + esc(it.name) + '"></td>' +
         '<td class="c"><input type="checkbox" class="check" id="pi-bound-' + id + '" data-chg="item" data-id="' + id + '" data-f="bound"' + (it.bound ? ' checked' : '') + ' aria-label="' + esc(it.name) + ' is bound"></td>' +
         '<td class="num">' + u + '</td>' +
-        '<td class="when">' + ago(it.updatedAt) + (isStale ? ' <span class="tag warn">Old</span>' : '') + '</td>' +
+        '<td class="when"' + (seen !== (num(it.updatedAt) || null) ? ' title="Price set ' + esc(ago(it.updatedAt)) + ', still the same on the market ' + esc(ago(seen)) + '"' : '') + '>' + ago(seen) + (isStale ? ' <span class="tag warn">Old</span>' : '') + '</td>' +
         '<td class="c">' + (deletable && canManage() ? '<button class="btn small ghost" data-act="item-del" data-id="' + id + '">Delete</button>' : '') + '</td></tr>';
       if (open) h += '<tr class="detail"><td colspan="9">' + priceDetail(it) + '</td></tr>';
     }
@@ -1765,13 +1770,13 @@
     const hist = histOf(it);
     const flag = '<label class="check"><input type="checkbox" id="pu-' + esc(it.id) + '" data-chg="item" data-id="' + esc(it.id) + '" data-f="unavailable"' + (it.unavailable ? ' checked' : '') + '> ' +
       esc(it.name) + ' isn’t in the Global client yet. Leave out every recipe that uses it.</label>';
-    if (!hist.length) return '<div class="ppanel">' + flag + '<p class="help">No prices recorded for ' + esc(it.name) + ' yet. Enter one above or paste a price list on the Import tab, and each new price is added here.</p></div>';
+    if (!hist.length) return '<div class="ppanel">' + flag + alertForm(it) + '<p class="help">No prices recorded for ' + esc(it.name) + ' yet. Enter one above or paste a price list on the Import tab, and each new price is added here.</p></div>';
     let lo = Infinity, hi = -Infinity, sum = 0;
     for (const x of hist) { lo = Math.min(lo, x.p); hi = Math.max(hi, x.p); sum += x.p; }
     const first = hist[0], last = hist[hist.length - 1];
     const ch = (last.p - first.p) / first.p;
     const stat = (l, v) => '<div class="stat"><dt>' + l + '</dt><dd>' + v + '</dd></div>';
-    let h = '<div class="ppanel">' + flag + '<dl class="statrow">' + stat('Latest', k(last.p)) + stat('Lowest', k(lo)) + stat('Highest', k(hi)) + stat('Average', k(sum / hist.length)) +
+    let h = '<div class="ppanel">' + flag + alertForm(it) + '<dl class="statrow">' + stat('Latest', k(last.p)) + stat('Lowest', k(lo)) + stat('Highest', k(hi)) + stat('Average', k(sum / hist.length)) +
       stat('Since first reading', hist.length > 1 ? (ch >= 0 ? '+' : '−') + Math.abs(ch * 100).toFixed(1) + '%' : '—') + stat('Readings', NF0.format(hist.length)) + '</dl>';
     h += '<div class="chart" data-item="' + esc(it.id) + '" tabindex="0" aria-label="Price history of ' + esc(it.name) + '. Use the arrow keys to step through readings."></div>';
     h += '<details class="hist"><summary>All ' + plural(hist.length, 'reading') + '</summary><div class="mini-well"><table class="mini"><thead><tr><th>When</th><th class="num">Price</th><th class="num">Change</th><th><span class="sr">Delete</span></th></tr></thead><tbody>' +
@@ -1873,83 +1878,127 @@
     return '<div class="toolbar"><h2 class="sec-h">Import prices</h2></div>' + marketPanel() + pasteHTML();
   }
 
-  /* ---------- market prices from aion2.exchange, through the relay in relay/worker.js ---------- */
-  const MKT = { asking: false, note: '' };
-  const MKT_BATCH = 50; // aion2.exchange answers 50 items at a time
+  /* ---------- market prices and price alerts, through the relay in relay/worker.js ---------- */
+  // The relay checks aion2.exchange every hour, saves the prices that changed and records the check in
+  // market/status. Members can ask for a check now, and set alerts that it sends to their Discord.
+  const MKT = { asking: false, note: '', testing: false };
+  const WEBHOOK_RE = /^https:\/\/((canary|ptb)\.)?discord(app)?\.com\/api\/webhooks\/\d{5,30}\/[A-Za-z0-9_-]{20,100}$/;
   function relayUrl() {
     const r = window.KINA_CONFIG && window.KINA_CONFIG.relay;
     return typeof r === 'string' && /^https:\/\//.test(r) ? r.replace(/\/+$/, '') : null;
   }
-  function mktServer() {
-    const s = window.KINA_CONFIG && window.KINA_CONFIG.marketServer;
-    return s && /^[A-Za-z0-9_-]{1,40}$/.test(String(s.id)) ? { id: String(s.id), name: String(s.name || s.id) } : null;
-  }
-  async function relayGet(path) {
+  async function relayPost(path, body) {
     const user = AUTH && AUTH.currentUser;
     if (!user) throw new Error('sign in first.');
-    const res = await fetch(relayUrl() + path, { headers: { Authorization: 'Bearer ' + await user.getIdToken() } });
-    const body = await res.json().catch(() => null);
-    if (!res.ok) throw new Error(body && body.error || 'the relay answered ' + res.status + '.');
-    return body;
+    const res = await fetch(relayUrl() + path, { method: 'POST', headers: { Authorization: 'Bearer ' + await user.getIdToken(), 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+    const d = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(d && d.error || 'the relay answered ' + res.status + '.');
+    return d;
   }
-  // aion2.exchange's answer: { items: [{ item_key, price, listed, captured_at, … }] }. Only items listed now count.
-  function readPrices(d) {
-    const prices = new Map();
-    let at = 0;
-    for (const x of d && Array.isArray(d.items) ? d.items : []) {
-      const k = String(x && x.item_key), p = num(x && x.price);
-      if (!MARKET_KEY.test(k) || x.listed === false || !(p > 0)) continue;
-      prices.set(k, p);
-      at = Math.max(at, Date.parse(x.captured_at) || 0);
-    }
-    return { prices: prices, at: at };
+  function readMarket(x) {
+    if (!x || !(num(x.at) > 0)) return null;
+    return { at: num(x.at), server: String(x.serverName || x.server || ''), checked: num(x.checked) || 0, changed: num(x.changed) || 0, missing: new Set(Array.isArray(x.missing) ? x.missing.map(String) : []) };
+  }
+  // When an item's price was last known to be right: the hourly check confirms one it found unchanged.
+  function seenAt(it) {
+    const t = it && num(it.updatedAt) || 0, m = S.market;
+    return it && it.marketKey && m && m.at > t && num(it.price) > 0 && !it.unavailable && !m.missing.has(it.marketKey) ? m.at : t || null;
   }
   function keyedItems() { return [...S.items.values()].filter(it => it.marketKey && !it.unavailable); }
   function marketPanel() {
-    const server = mktServer();
-    if (!relayUrl() || !server) return '';
+    if (!relayUrl()) return '';
     let h = '<section class="panel"><h3 class="sec-h">Market prices from aion2.exchange</h3>';
-    if (S.mode !== 'db') return h + '<p class="help">Sign in to the shared price book to refresh prices from aion2.exchange.</p></section>';
-    const have = keyedItems().length;
-    h += '<p class="help">Asks aion2.exchange for the cheapest listing on ' + esc(server.name) + ' of each item whose market key is known: ' + NF0.format(have) + ' of ' + plural(S.items.size, 'item') + ' so far. ' +
-      'An item’s key is learned when you paste a table from aion2.exchange below. Nothing is saved until you check the list.</p>' +
-      '<div class="row-gap"><button class="btn primary" data-act="mkt-refresh"' + (MKT.asking || !have ? ' disabled' : '') + '>' + (MKT.asking ? 'Asking aion2.exchange…' : 'Refresh market prices') + '</button></div>';
+    if (S.mode !== 'db') return h + '<p class="help">Sign in to the shared price book: its prices refresh themselves from aion2.exchange every hour.</p></section>';
+    const m = S.market, have = keyedItems().length;
+    h += '<p class="help">Prices refresh themselves every hour' + (m && m.server ? ' from ' + esc(m.server) + '’s market' : '') + ' for each item whose aion2.exchange key is known: ' + NF0.format(have) + ' of ' + plural(S.items.size, 'item') + ' so far. ' +
+      'A key is learned when you paste a table from aion2.exchange below. Every price is saved; one far from its usual price is labelled <strong>Doubtful price</strong> and the math keeps using the usual one.</p>' +
+      '<div class="row-gap"><span class="help">' + (m ? 'Last checked ' + esc(ago(m.at)) + ': ' + plural(m.changed, 'price') + ' changed' + (m.missing.size ? ', ' + plural(m.missing.size, 'item') + ' with no listings' : '') + '.'
+        : S.marketState === 'denied' ? 'Publish the latest firestore.rules to see when prices were last checked.' : 'No check has run yet.') + '</span>' +
+      '<button class="btn" data-act="mkt-refresh"' + (MKT.asking || !have ? ' disabled' : '') + '>' + (MKT.asking ? 'Checking…' : 'Check now') + '</button></div>';
     if (MKT.note) h += '<p class="help" role="status">' + esc(MKT.note) + '</p>';
-    h += '</section>';
-    if (UI.shots.market && UI.shots.source === 'market') h += marketReview();
-    return h;
+    return h + '</section>';
   }
-  // Changed prices go to the usual check list; unchanged ones are kept to mark as current when it's saved.
   async function marketRefresh() {
-    const server = mktServer(), items = keyedItems();
-    if (!server || !items.length || MKT.asking) return;
+    if (MKT.asking) return;
     MKT.asking = true; MKT.note = ''; render();
-    const prices = new Map(), keys = [...new Set(items.map(it => it.marketKey))];
-    let at = 0;
     try {
-      for (let i = 0; i < keys.length; i += MKT_BATCH) {
-        const got = readPrices(await relayGet('/items?server=' + encodeURIComponent(server.id) + '&keys=' + keys.slice(i, i + MKT_BATCH).join(',')));
-        for (const [k, p] of got.prices) prices.set(k, p);
-        at = Math.max(at, got.at);
-      }
-    } catch (e) { MKT.asking = false; MKT.note = 'Couldn’t refresh: ' + e.message; render(); return; }
-    MKT.asking = false;
-    const C = buildCalc(), rows = [], same = [];
-    let none = 0;
-    for (const it of items) {
-      const p = prices.get(it.marketKey);
-      if (!(p > 0)) { none++; continue; }
-      if (p === num(it.price)) { same.push({ id: it.id, price: p }); continue; }
-      const doubt = newPriceDoubt(it, p, C);
-      rows.push({ read: null, name: it.name, include: !doubt, priceText: NF0.format(p), doubt: doubt });
+      const d = await relayPost('/refresh');
+      MKT.note = d.skipped ? 'Prices were checked ' + ago(d.at) + ', so they’re current. A check can be asked for every 10 minutes.'
+        : 'Checked ' + plural(d.checked, 'item') + ': ' + plural(d.changed, 'price') + ' changed' + (d.missing ? ', ' + plural(d.missing, 'item') + ' had no listings' : '') + '.' + (d.alerts ? ' ' + plural(d.alerts, 'price alert') + ' went off.' : '');
+    } catch (e) { MKT.note = 'Couldn’t check: ' + e.message; }
+    MKT.asking = false; render();
+  }
+
+  // Price alerts: per member, an item and the price at or below (or at or above) which to be told.
+  function readAlerts(x) {
+    const rules = {};
+    const src = x && x.rules && typeof x.rules === 'object' ? x.rules : {};
+    for (const id of Object.keys(src).slice(0, 100)) {
+      const r = src[id] || {}, below = num(r.below), above = num(r.above);
+      if (below > 0 || above > 0) rules[id] = Object.assign({}, below > 0 ? { below: below } : {}, above > 0 ? { above: above } : {});
     }
-    UI.shots.market = rows.length || same.length ? rows : null; UI.shots.same = same; UI.shots.source = 'market';
-    const doubtful = rows.filter(r => r.doubt).length;
-    MKT.note = (at ? 'aion2.exchange last read the market ' + ago(at) + '. ' : '') +
-      (rows.length ? plural(rows.length, 'price') + ' changed' : 'No prices changed') + (same.length ? ', ' + NF0.format(same.length) + ' stayed the same' : '') +
-      (none ? ', ' + plural(none, 'item') + ' had no listings' : '') + '.' + (doubtful ? ' ' + plural(doubtful, 'price') + ' looked wrong and ' + (doubtful === 1 ? 'is' : 'are') + ' unticked.' : '') +
-      (rows.length ? ' Check them below, then save.' : same.length ? ' Save to mark them as current.' : '');
-    render();
+    return { rules: rules, discord: x && typeof x.discord === 'string' && WEBHOOK_RE.test(x.discord) ? x.discord : null };
+  }
+  function readHits(x) {
+    return (x && Array.isArray(x.hits) ? x.hits : []).filter(h => h && num(h.at) > 0 && num(h.p) > 0)
+      .map(h => ({ i: String(h.i || ''), n: String(h.n || ''), p: num(h.p), k: h.k === 'above' ? 'above' : 'below', v: num(h.v), at: num(h.at), off: !!h.off, u: num(h.u) }))
+      .sort((a, b) => b.at - a.at);
+  }
+  function myAlerts() { return S.alerts || { rules: {}, discord: null }; }
+  function setAlerts(next) {
+    S.alerts = next;
+    dbWrite('alerts/' + S.uid, clean({ rules: next.rules, discord: next.discord, at: Date.now() }));
+  }
+  function alertText(r) {
+    return [r.below > 0 ? k(r.below) + ' or less' : '', r.above > 0 ? k(r.above) + ' or more' : ''].filter(Boolean).join(' · ');
+  }
+  // Alerts that went off since this browser last showed the Prices tab, for the badge on the tab.
+  function unseenHits() { const seen = num(UI.alertSeen) || 0; return (S.alertHits || []).filter(h => h.at > seen).length; }
+  function markHitsSeen() {
+    const newest = (S.alertHits || []).reduce((m, x) => Math.max(m, x.at), 0);
+    if (newest > (num(UI.alertSeen) || 0)) { UI.alertSeen = String(newest); saveUI(); }
+  }
+  // The alerts panel at the top of the Prices tab.
+  function alertsPanel() {
+    if (!relayUrl() || S.mode !== 'db') return '';
+    if (S.alertsState === 'denied') return '<section class="panel"><h3 class="sec-h">Price alerts</h3><p class="help">Publish the latest firestore.rules to use price alerts.</p></section>';
+    const a = myAlerts(), ids = Object.keys(a.rules), hits = S.alertHits || [], recent = hits.filter(x => Date.now() - x.at < DAY).length;
+    const open = UI.alertsOpen != null ? UI.alertsOpen : recent > 0;
+    let h = '<details class="panel alerts"' + (open ? ' open' : '') + '><summary data-act="alerts-toggle"><h3 class="sec-h">Price alerts</h3><span class="help">' +
+      (ids.length ? plural(ids.length, 'alert') + ' set' : 'None set yet') + (recent ? ' · <strong>' + NF0.format(recent) + ' went off in the last day</strong>' : '') + '</span></summary>' +
+      '<p class="help">Open an item below (click its name) to set the price at which you want to hear about it. Each hour’s check tells you when an item’s price crosses your line' +
+      (a.discord ? ', here and in your Discord channel.' : '. Add a Discord webhook to get a message too.') + '</p>';
+    const draft = UI.webhookDraft != null ? UI.webhookDraft : a.discord || '';
+    h += '<div class="field"><label for="al-hook">Discord webhook</label><div class="row-gap"><input id="al-hook" class="in al-hook" type="url" value="' + esc(draft) + '" placeholder="https://discord.com/api/webhooks/…" data-inp="al-hook" autocomplete="off" spellcheck="false">' +
+      '<button class="btn" data-act="al-hook-save"' + (draft === (a.discord || '') ? ' disabled' : '') + '>Save</button>' +
+      '<button class="btn ghost" data-act="al-hook-test"' + (!WEBHOOK_RE.test(draft) || MKT.testing ? ' disabled' : '') + '>' + (MKT.testing ? 'Sending…' : 'Send a test') + '</button></div>' +
+      '<p class="help">In Discord: the channel’s settings → Integrations → Webhooks → New Webhook → Copy Webhook URL. Only you can see it here.</p></div>';
+    if (ids.length) {
+      h += '<div class="mini-well"><table class="mini"><thead><tr><th>Item</th><th>Tell me at</th><th class="num">Price now</th><th><span class="sr">Remove</span></th></tr></thead><tbody>' +
+        ids.map(id => {
+          const it = getItem(id);
+          return '<tr><td>' + (it ? '<button class="name-btn" data-act="price-open" data-id="' + esc(id) + '">' + nameHTML(id) + '</button>' : '<span class="muted">(deleted item)</span>') + '</td><td>' + esc(alertText(a.rules[id])) + '</td>' +
+            '<td class="num">' + (it && num(it.price) > 0 ? k(it.price) : '—') + '</td><td><button class="btn small ghost" data-act="al-del" data-id="' + esc(id) + '">Remove</button></td></tr>';
+        }).join('') + '</tbody></table></div>';
+    }
+    if (hits.length) {
+      h += '<h4 class="ck-h">Went off</h4><ul class="al-hits">' + hits.slice(0, 10).map(x =>
+        '<li><span>' + esc(x.n) + (x.k === 'below' ? ' dropped to ' : ' rose to ') + '<strong>' + k(x.p) + '</strong> (your line: ' + k(x.v) + ')' +
+        (x.off ? ' <span class="tag loss">Looks off</span>' : '') + '</span><span class="when">' + esc(ago(x.at)) + '</span></li>').join('') + '</ul>';
+    }
+    return h + '</details>';
+  }
+  // The form inside an item's price panel.
+  function alertForm(it) {
+    if (!relayUrl() || S.mode !== 'db' || S.alertsState === 'denied') return '';
+    if (!it.marketKey) return '<p class="help">Price alerts need this item’s aion2.exchange key: paste a table from aion2.exchange that lists it, on the Import tab.</p>';
+    const r = myAlerts().rules[it.id] || {}, d = UI.alertDraft && UI.alertDraft.id === it.id ? UI.alertDraft : { id: it.id, below: r.below ? NF0.format(r.below) : '', above: r.above ? NF0.format(r.above) : '' };
+    const id = esc(it.id);
+    return '<div class="al-form"><span class="help">Price alert: tell me when it’s at or below</span>' +
+      '<input class="in num al-in" inputmode="decimal" value="' + esc(d.below) + '" placeholder="—" data-inp="al-draft" data-k="below" data-id="' + id + '" aria-label="Alert at or below">' +
+      '<span class="help">or at or above</span><input class="in num al-in" inputmode="decimal" value="' + esc(d.above) + '" placeholder="—" data-inp="al-draft" data-k="above" data-id="' + id + '" aria-label="Alert at or above">' +
+      '<button class="btn small" data-act="al-save" data-id="' + id + '">' + (r.below || r.above ? 'Update alert' : 'Set alert') + '</button>' +
+      (r.below || r.above ? '<button class="btn small ghost" data-act="al-del" data-id="' + id + '">Remove</button>' : '') + '</div>';
   }
   function pasteHTML() {
     const st = UI.shots;
@@ -2039,11 +2088,10 @@
   }
   function marketReview() {
     const rows = UI.shots.market;
-    const n = rows.filter(r => r.include).length, same = UI.shots.source === 'market' && UI.shots.same ? UI.shots.same.length : 0;
+    const n = rows.filter(r => r.include).length;
     let h = '<section class="panel"><div class="toolbar"><h3 class="sec-h">' + 'Check the prices found' + '</h3><div class="row-gap"><button class="btn ghost" data-act="shot-discard">Discard</button>' +
-      '<button class="btn primary" data-act="shot-apply"' + (n || same ? '' : ' disabled') + '>' + (n || !same ? 'Save ' + plural(n, 'price') : 'Mark ' + plural(same, 'price') + ' as current') + '</button></div></div>' +
-      '<p class="help">' + (rows.length ? 'Fix any name that matched the wrong item, untick rows you don’t want, then save.' : '') +
-      (same ? (rows.length ? ' ' : '') + 'Saving also marks the ' + plural(same, 'price') + ' that stayed the same as current.' : '') + '</p>' +
+      '<button class="btn primary" data-act="shot-apply"' + (n ? '' : ' disabled') + '>Save ' + plural(n, 'price') + '</button></div></div>' +
+      '<p class="help">Fix any name that matched the wrong item, untick rows you don’t want, then save.</p>' +
       '<div class="well"><table class="grid prices" style="min-width:640px"><thead><tr><th class="c">Save</th><th>Item</th><th>Change</th><th class="num w-num">Price per unit</th></tr></thead><tbody>';
     rows.forEach((r, i) => {
       const match = findItem(r.name);
@@ -3743,8 +3791,43 @@
       render();
     },
     'paste-clear': () => { UI.shots.pasteText = ''; UI.shots.pasteNote = ''; if (UI.shots.source === 'paste') UI.shots.market = null; render(); },
-    'shot-discard': () => { UI.shots.market = null; UI.shots.same = null; UI.shots.error = ''; MKT.note = ''; render(); },
+    'shot-discard': () => { UI.shots.market = null; UI.shots.error = ''; render(); },
     'mkt-refresh': () => marketRefresh(),
+    'alerts-toggle': t => { UI.alertsOpen = !t.parentElement.open; render(); },
+    'al-save': t => {
+      const id = t.dataset.id, it = getItem(id), d = UI.alertDraft && UI.alertDraft.id === id ? UI.alertDraft : {};
+      const r = myAlerts().rules[id] || {}, raw = f => d[f] != null ? String(d[f]).trim() : r[f] ? String(r[f]) : '';
+      const below = raw('below') ? num(raw('below')) : null, above = raw('above') ? num(raw('above')) : null;
+      if (!it) return;
+      if ((raw('below') && !(below > 0 && below < 1e12)) || (raw('above') && !(above > 0 && above < 1e12))) { toast('Type a price like 4500, 4,500 or 4.5k.'); return; }
+      if (!below && !above) { toast('Type the price to be told at.'); return; }
+      if (below && above && below >= above) { toast('The low price has to be under the high one.'); return; }
+      const a = myAlerts();
+      if (!a.rules[id] && Object.keys(a.rules).length >= 100) { toast('That’s 100 alerts already. Remove one first.'); return; }
+      const rules = Object.assign({}, a.rules, { [id]: Object.assign({}, below ? { below: below } : {}, above ? { above: above } : {}) });
+      setAlerts({ rules: rules, discord: a.discord }); UI.alertDraft = null;
+      const p = num(it.price);
+      toast('Alert set for ' + it.name + '.' + (p > 0 && ((below && p <= below) || (above && p >= above)) ? ' It’s already past that line at ' + k(p) + ', so you’ll hear when it crosses it again.' : (S.alerts.discord ? ' It’ll also go to your Discord.' : '')));
+      render();
+    },
+    'al-del': t => {
+      const a = myAlerts(), rules = Object.assign({}, a.rules);
+      delete rules[t.dataset.id];
+      setAlerts({ rules: rules, discord: a.discord }); UI.alertDraft = null; render();
+    },
+    'al-hook-save': () => {
+      const url = String(UI.webhookDraft || '').trim();
+      if (url && !WEBHOOK_RE.test(url)) { toast('That isn’t a Discord webhook link. It starts with https://discord.com/api/webhooks/'); return; }
+      setAlerts({ rules: myAlerts().rules, discord: url || null }); UI.webhookDraft = null;
+      toast(url ? 'Saved. Alerts will also be posted to that Discord channel.' : 'Removed the Discord webhook.'); render();
+    },
+    'al-hook-test': async () => {
+      const url = String(UI.webhookDraft != null ? UI.webhookDraft : myAlerts().discord || '').trim();
+      MKT.testing = true; render();
+      try { await relayPost('/discord-test', { url: url }); toast('Sent. Check the Discord channel.'); }
+      catch (e) { toast('Couldn’t send it: ' + e.message); }
+      MKT.testing = false; render();
+    },
     'shot-apply': () => applyMarket(),
     'io-export': () => { UI.io.exportText = JSON.stringify({ app: 'kina-ledger', version: 3, exportedAt: new Date().toISOString(), settings: S.settings, myLevels: myLevels(), myGather: S.uid ? [...myGather()] : null, myRuns: myRuns(), myCrafts: myCrafts(), myCraftMin: myCraftMin(), myChecklist: myChecklist(), items: [...S.items.values()], recipes: [...S.recipes.values()] }, null, 2); render(); },
     'io-hide': () => { UI.io.exportText = ''; render(); },
@@ -3853,6 +3936,8 @@
   };
 
   const INPUTS = {
+    'al-hook': t => { UI.webhookDraft = t.value; const b = view.querySelector('[data-act="al-hook-save"]'), c = view.querySelector('[data-act="al-hook-test"]'); if (b) b.disabled = t.value.trim() === (myAlerts().discord || ''); if (c) c.disabled = !WEBHOOK_RE.test(t.value.trim()) || MKT.testing; },
+    'al-draft': t => { const r = myAlerts().rules[t.dataset.id] || {}; UI.alertDraft = Object.assign(UI.alertDraft && UI.alertDraft.id === t.dataset.id ? UI.alertDraft : { id: t.dataset.id, below: r.below ? NF0.format(r.below) : '', above: r.above ? NF0.format(r.above) : '' }, { [t.dataset.k]: t.value }); },
     'ck-draft': t => { UI.ckDraft = Object.assign({ name: '', every: 'day', max: '1' }, UI.ckDraft, { [t.dataset.k]: t.value }); },
     'ck-char-draft': t => { UI.ckCharDraft = t.value; },
     ed: t => {
@@ -3911,13 +3996,8 @@
         add++;
       }
     }
-    let cur = 0;
-    if (UI.shots.source === 'market') for (const x of UI.shots.same || []) {
-      const it = S.items.get(x.id);
-      if (it && num(it.price) === x.price) { Store.putItem(withPrice(it, x.price, ts)); cur++; }
-    }
-    UI.shots.market = null; UI.shots.same = null; UI.shots.status = 'idle'; MKT.note = '';
-    toast('Saved ' + plural(upd, 'price') + (add ? ' and added ' + plural(add, 'new item') : '') + (cur ? (add ? ', and marked ' : ' and marked ') + NF0.format(cur) + ' unchanged as current' : '') + '.');
+    UI.shots.market = null; UI.shots.status = 'idle';
+    toast('Saved ' + plural(upd, 'price') + (add ? ' and added ' + plural(add, 'new item') : '') + '.');
     render();
   }
 
@@ -3954,6 +4034,7 @@
     for (const stop of unsubs) stop();
     unsubs = [];
     DB = null; S.mode = 'local'; S.role = 'owner'; S.uid = null; S.mine = null; S.myGather = null; S.myRuns = null; S.myCrafts = null; S.myCraftMin = null; S.pool = new Map(); S.poolLoaded = false; poolSent = ''; S.ck = null; S.ckState = null;
+    S.market = null; S.marketState = null; S.alerts = null; S.alertsState = null; S.alertHits = null;
     S.items = new Map(); S.recipes = new Map(); S.settings = mergeSettings(null);
     loadLocal();
     itemsVer++; recipesVer++;
@@ -3972,6 +4053,7 @@
     unsubs = [];
     S.auth = 'member'; S.role = member.role === 'owner' ? 'owner' : 'member';
     DB = fs; S.mode = 'db'; S.uid = user.uid; S.mine = null; S.myGather = null; S.myRuns = null; S.myCrafts = null; S.myCraftMin = null; S.pool = new Map(); S.poolLoaded = false; poolSent = ''; S.ck = null; S.ckState = 'loading'; S.ready = false;
+    S.market = null; S.marketState = null; S.alerts = null; S.alertsState = null; S.alertHits = null;
     S.items = new Map(); S.recipes = new Map();
     render();
     subscribe();
@@ -3984,6 +4066,19 @@
       if (first && !d.exists && local) setChecklist(ckLocal());
       scheduleRender();
     }, () => { S.ckState = 'denied'; scheduleRender(); }));
+    // When the relay last checked the market, your price alerts, and the ones that went off.
+    unsubs.push(DB.doc('market/status').onSnapshot(d => { S.market = readMarket(d.exists ? d.data() : null); S.marketState = 'ok'; itemsVer++; scheduleRender(); },
+      () => { S.marketState = 'denied'; scheduleRender(); }));
+    unsubs.push(DB.doc('alerts/' + user.uid).onSnapshot(d => { S.alerts = readAlerts(d.exists ? d.data() : null); S.alertsState = 'ok'; itemsVer++; scheduleRender(); },
+      () => { S.alertsState = 'denied'; scheduleRender(); }));
+    unsubs.push(DB.doc('alertHits/' + user.uid).onSnapshot(d => {
+      const hits = readHits(d.exists ? d.data() : null), had = S.alertHits;
+      if (had) {
+        const newest = had.reduce((m, x) => Math.max(m, x.at), 0), fresh = hits.filter(x => x.at > newest);
+        if (fresh.length) toast(fresh.length === 1 ? 'Price alert: ' + fresh[0].n + (fresh[0].k === 'below' ? ' dropped to ' : ' rose to ') + k(fresh[0].p) + '.' : plural(fresh.length, 'price alert') + ' went off. See the Prices tab.');
+      }
+      S.alertHits = hits; scheduleRender();
+    }, () => {}));
     unsubs.push(DB.collection('pool').limit(200).onSnapshot(snap => {
       S.pool = new Map(snap.docs.map(d => [d.id, readPool(d.data())]));
       if (!S.poolLoaded) { S.poolLoaded = true; writePool(); }

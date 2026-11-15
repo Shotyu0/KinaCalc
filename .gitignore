@@ -10,3 +10,6 @@ node_modules/
 Thumbs.db
 *.log
 .wrangler/
+
+# A Firebase service account key, if downloaded here by mistake. It only belongs in the Worker secret.
+*firebase-adminsdk*.json

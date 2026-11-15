@@ -106,6 +106,28 @@ service cloud.firestore {
         && optTime(request.resource.data, 'at');
     }
 
+    // Each member's price alerts: per item, the price at or below / at or above which to be told, and
+    // the Discord webhook to post them to. Private to them; the relay reads them with its own key.
+    match /alerts/{uid} {
+      allow read: if isMember() && request.auth.uid == uid;
+      allow write: if isMember() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['rules', 'discord', 'at'])
+        && request.resource.data.rules is map && request.resource.data.rules.size() <= 100
+        && (!('discord' in request.resource.data) || request.resource.data.discord == null
+          || (request.resource.data.discord is string && request.resource.data.discord.matches('https://((canary|ptb)[.])?discord(app)?[.]com/api/webhooks/[0-9]+/[A-Za-z0-9_-]+')))
+        && optTime(request.resource.data, 'at');
+    }
+    // The alerts that went off, written by the relay. Each member reads their own.
+    match /alertHits/{uid} {
+      allow read: if isMember() && request.auth.uid == uid;
+      allow write: if false;
+    }
+    // When the relay last checked the market, and which items had no listings. Written by the relay.
+    match /market/{docId} {
+      allow read: if isMember();
+      allow write: if false;
+    }
+
     // Problem reports from the live gathering tracker: a picture of the popup frames and what was read.
     // Members send them under their own address; only the owner reads or deletes them.
     match /reports/{id} {

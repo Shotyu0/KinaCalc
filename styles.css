@@ -261,6 +261,25 @@ tr.detail > td { background: var(--sunk); padding: 16px; border-top: 0; }
 .ck-edit input.in:not(.ck-max) { flex: 1 1 200px; max-width: 340px; }
 .ck-edit .ck-main { justify-content: flex-start; }
 .ck-edit .ck-max { width: 4em; }
+/* Price alerts */
+.tab-n { display: inline-block; min-width: 18px; margin-left: 4px; padding: 2px 5px; border-radius: 9px; background: var(--gold); color: var(--on-gold); font-size: 11px; line-height: 14px; text-align: center; }
+details.alerts > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; cursor: pointer; list-style: none; }
+details.alerts > summary::-webkit-details-marker { display: none; }
+details.alerts > summary::before { content: "▸"; color: var(--ink-3); }
+details.alerts[open] > summary::before { content: "▾"; }
+details.alerts > summary .sec-h { margin: 0; }
+details.alerts[open] > summary { margin-bottom: 10px; }
+.al-hook { flex: 1 1 260px; max-width: 520px; width: auto; }
+details.alerts .field { margin: 14px 0 6px; }
+details.alerts .field .help { margin: 6px 0 0; }
+details.alerts .mini-well { margin: 14px 0 6px; }
+details.alerts .ck-h { margin-top: 14px; }
+.al-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0; }
+.al-in { width: 7em; }
+.al-hits { list-style: none; margin: 0; padding: 0; }
+.al-hits li { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 14px; }
+.al-hits li:first-child { border-top: 0; }
+.al-hits .when { color: var(--ink-3); white-space: nowrap; }
 .live-limit { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 14px; }
 .live-limit .in { width: 5em; }
 .live-snap { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 8px; cursor: crosshair; touch-action: none; }

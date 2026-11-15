@@ -1,13 +1,23 @@
-# Cloudflare Worker that passes market prices from aion2.exchange to the page (see worker.js).
+# Cloudflare Worker that checks aion2.exchange's prices every hour and sends price alerts (see worker.js).
 # Deploy from this folder:
 #   npx wrangler login
 #   npx wrangler kv namespace create PRICES     (say yes when it offers to add it to this file)
+#   npx wrangler secret put FIREBASE_SA         (the Firebase service account key, as JSON)
 #   npx wrangler deploy
 # The PRICES store keeps answers for 30 minutes, shared by everyone. Without it, each copy of the
 # Worker keeps its own.
 name = "kina-relay"
 main = "worker.js"
 compatibility_date = "2025-10-01"
+
+# Twenty past each hour, after aion2.exchange's hourly reading.
+[triggers]
+crons = ["20 * * * *"]
+
+# The server whose market is read: its id on aion2.exchange (from aion2.exchange/api/servers).
+[vars]
+MARKET_SERVER = "11101"
+MARKET_SERVER_NAME = "Siel"
 
 [[kv_namespaces]]
 binding = "PRICES"
