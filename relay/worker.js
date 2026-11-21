@@ -15,7 +15,9 @@ const FS = 'https://firestore.googleapis.com/v1/' + DOCS.slice(0, -1);
 const ORIGINS = /^(https:\/\/shotyu0\.github\.io|http:\/\/(localhost|127\.0\.0\.1)(:\d+)?)$/;
 const KEY = /^\d{9}$/, SERVER = /^[A-Za-z0-9_-]{1,40}$/;
 const WEBHOOK = /^https:\/\/((canary|ptb)\.)?discord(app)?\.com\/api\/webhooks\/\d{5,30}\/[A-Za-z0-9_-]{20,100}$/;
-const BATCH = 50;          // aion2.exchange answers 50 items at a time
+const BATCH = 25;          // items asked at a time (aion2.exchange allows 50, but big asks can time out there)
+const SMALLEST = 5;        // a group this small that still fails means aion2.exchange is down
+const ASKS = 40;           // most requests to aion2.exchange in one check
 const KEEP = 1800;         // seconds an answer is kept for members asking close together
 const AGAIN = 10 * 60e3;   // a member's check runs at most this often
 const HITS = 30;           // fired alerts kept per member
@@ -72,14 +74,17 @@ async function run(env, ctx, why) {
   const items = await fsList(token, 'items', ['name', 'price', 'updatedAt', 'marketKey', 'unavailable']);
   const keyed = items.filter(it => typeof it.marketKey === 'string' && KEY.test(it.marketKey) && !it.unavailable);
   const keys = [...new Set(keyed.map(it => it.marketKey))].sort();
-  const seen = new Map();
+  const seen = new Map(), plan = { size: BATCH, left: ASKS };
   try {
-    for (let i = 0; i < keys.length; i += BATCH) {
-      const d = await askMarket(env, ctx, server, keys.slice(i, i + BATCH), why === 'hourly');
-      for (const x of d && Array.isArray(d.items) ? d.items : []) {
-        const k = String(x && x.item_key), p = Number(x && x.price);
-        if (KEY.test(k) && x.listed !== false && p > 0 && isFinite(p)) seen.set(k, p);
+    for (let i = 0; i < keys.length;) {
+      const part = keys.slice(i, i + plan.size);
+      for (const d of await askGroup(env, ctx, server, part, why === 'hourly', plan)) {
+        for (const x of d && Array.isArray(d.items) ? d.items : []) {
+          const k = String(x && x.item_key), p = Number(x && x.price);
+          if (KEY.test(k) && x.listed !== false && p > 0 && isFinite(p)) seen.set(k, p);
+        }
       }
+      i += part.length;
     }
   } catch (e) {
     // Nothing is saved from a check that didn't get every price. The page shows why it failed.
@@ -148,9 +153,23 @@ function discord(url, content) {
   return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'Kina Ledger', content: content, allowed_mentions: { parse: [] } }) });
 }
 
+// aion2.exchange's answers for a group of keys. When it's too busy for the group, it asks for each half
+// after a short pause, and keeps to that smaller size for the rest of the check.
+async function askGroup(env, ctx, server, keys, fresh, plan) {
+  try { return [await askMarket(env, ctx, server, keys, fresh, plan)]; }
+  catch (e) {
+    if (!e.busy || keys.length <= SMALLEST || plan.left < 2) throw e;
+    const half = Math.ceil(keys.length / 2);
+    console.warn('aion2.exchange couldn’t answer for ' + keys.length + ' items; asking ' + half + ' at a time.');
+    plan.size = Math.min(plan.size, half);
+    await new Promise(r => setTimeout(r, Math.min(Math.max(e.retry || 1, 1), 5) * 1000));
+    return (await askGroup(env, ctx, server, keys.slice(0, half), fresh, plan)).concat(await askGroup(env, ctx, server, keys.slice(half), fresh, plan));
+  }
+}
+
 // aion2.exchange's prices for up to 50 keys. The hourly check always asks; a member's check may use an
 // answer from the last 30 minutes.
-async function askMarket(env, ctx, server, keys, fresh) {
+async function askMarket(env, ctx, server, keys, fresh, plan) {
   const path = 'items?server=' + encodeURIComponent(server) + '&keys=' + keys.slice().sort().join(',');
   const id = await sha(path), kv = env.PRICES;
   let body = null;
@@ -160,16 +179,22 @@ async function askMarket(env, ctx, server, keys, fresh) {
     if (!body && kv) body = await kv.get(id);
   }
   if (body) return JSON.parse(body);
+  if (plan.left-- <= 0) throw marketError('aion2.exchange couldn’t answer after ' + ASKS + ' tries.');
   let r;
   try { r = await fetch(UPSTREAM + path, { headers: { 'User-Agent': UA, 'Accept': 'application/json' }, signal: AbortSignal.timeout(WAIT) }); }
-  catch (e) { throw marketError('aion2.exchange didn’t answer' + (e && e.name === 'TimeoutError' ? ' within ' + WAIT / 1000 + ' seconds' : ' (' + (e && e.message) + ')') + '.'); }
+  catch (e) {
+    const late = e && e.name === 'TimeoutError';
+    throw marketError('aion2.exchange didn’t answer' + (late ? ' within ' + WAIT / 1000 + ' seconds' : ' (' + (e && e.message) + ')') + '.', late);
+  }
   if (!r.ok) {
     const text = await r.text().catch(() => '');
     const gate = r.headers.get('cf-mitigated') === 'challenge' || /<title>Just a moment|challenge-platform/i.test(text);
-    console.error('aion2.exchange answered ' + r.status + ' (cf-ray ' + (r.headers.get('cf-ray') || '-') + ', retry-after ' + (r.headers.get('retry-after') || '-') + '): ' + text.replace(/\s+/g, ' ').slice(0, 300));
-    throw marketError(gate ? 'aion2.exchange asked for a browser check, which the relay can’t pass.'
+    console.error('aion2.exchange answered ' + r.status + ' for ' + keys.length + ' items (cf-ray ' + (r.headers.get('cf-ray') || '-') + ', retry-after ' + (r.headers.get('retry-after') || '-') + '): ' + text.replace(/\s+/g, ' ').slice(0, 300));
+    const e = marketError(gate ? 'aion2.exchange asked for a browser check, which the relay can’t pass.'
       : r.status === 429 ? 'aion2.exchange says it has had too many requests (429).'
-      : 'aion2.exchange answered ' + r.status + (r.status >= 500 ? ': the site is down or overloaded right now' : '') + '.');
+      : 'aion2.exchange answered ' + r.status + (r.status >= 500 ? ': the site is down or overloaded right now' : '') + '.', !gate && [500, 502, 503, 504].includes(r.status));
+    e.retry = parseInt(r.headers.get('retry-after'), 10) || 0;
+    throw e;
   }
   body = await r.text();
   let d;
@@ -179,7 +204,7 @@ async function askMarket(env, ctx, server, keys, fresh) {
   memo.set(id, { body: body, until: Date.now() + KEEP * 1000 });
   return d;
 }
-function marketError(message) { const e = new Error(message); e.market = true; return e; }
+function marketError(message, busy) { const e = new Error(message); e.market = true; e.busy = !!busy; return e; }
 
 // A member is someone signed in whose own record in `members` they can read. Firestore checks the
 // token's signature and the access rules. A token that passed is remembered until it expires.
