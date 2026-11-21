@@ -70,7 +70,7 @@
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
   let GATHERABLE = null; // names of materials gathered from nodes, from data/gather-icons.json
-  const BUILD = '2026-11-15a'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-11-21a'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -1896,8 +1896,9 @@
     return d;
   }
   function readMarket(x) {
-    if (!x || !(num(x.at) > 0)) return null;
-    return { at: num(x.at), server: String(x.serverName || x.server || ''), checked: num(x.checked) || 0, changed: num(x.changed) || 0, missing: new Set(Array.isArray(x.missing) ? x.missing.map(String) : []) };
+    if (!x || !(num(x.at) > 0 || num(x.failedAt) > 0)) return null;
+    return { at: num(x.at) || 0, server: String(x.serverName || x.server || ''), checked: num(x.checked) || 0, changed: num(x.changed) || 0, missing: new Set(Array.isArray(x.missing) ? x.missing.map(String) : []),
+      failedAt: num(x.failedAt) || 0, failed: typeof x.failed === 'string' ? x.failed.slice(0, 200) : '' };
   }
   // When an item's price was last known to be right: the hourly check confirms one it found unchanged.
   function seenAt(it) {
@@ -1912,9 +1913,10 @@
     const m = S.market, have = keyedItems().length;
     h += '<p class="help">Prices refresh themselves every hour' + (m && m.server ? ' from ' + esc(m.server) + '’s market' : '') + ' for each item whose aion2.exchange key is known: ' + NF0.format(have) + ' of ' + plural(S.items.size, 'item') + ' so far. ' +
       'A key is learned when you paste a table from aion2.exchange below. Every price is saved; one far from its usual price is labelled <strong>Doubtful price</strong> and the math keeps using the usual one.</p>' +
-      '<div class="row-gap"><span class="help">' + (m ? 'Last checked ' + esc(ago(m.at)) + ': ' + plural(m.changed, 'price') + ' changed' + (m.missing.size ? ', ' + plural(m.missing.size, 'item') + ' with no listings' : '') + '.'
-        : S.marketState === 'denied' ? 'Publish the latest firestore.rules to see when prices were last checked.' : 'No check has run yet.') + '</span>' +
+      '<div class="row-gap"><span class="help">' + (m && m.at ? 'Last checked ' + esc(ago(m.at)) + ': ' + plural(m.changed, 'price') + ' changed' + (m.missing.size ? ', ' + plural(m.missing.size, 'item') + ' with no listings' : '') + '.'
+        : m ? 'No check has worked yet.' : S.marketState === 'denied' ? 'Publish the latest firestore.rules to see when prices were last checked.' : 'No check has run yet.') + '</span>' +
       '<button class="btn" data-act="mkt-refresh"' + (MKT.asking || !have ? ' disabled' : '') + '>' + (MKT.asking ? 'Checking…' : 'Check now') + '</button></div>';
+    if (m && m.failedAt > m.at && !MKT.note) h += '<p class="help warn-text" role="status">The check ' + esc(ago(m.failedAt)) + ' didn’t get prices: ' + esc(m.failed || 'aion2.exchange didn’t answer.') + ' Prices stay as they were, and it tries again at 20 past every hour.</p>';
     if (MKT.note) h += '<p class="help" role="status">' + esc(MKT.note) + '</p>';
     return h + '</section>';
   }
@@ -1923,7 +1925,8 @@
     MKT.asking = true; MKT.note = ''; render();
     try {
       const d = await relayPost('/refresh');
-      MKT.note = d.skipped ? 'Prices were checked ' + ago(d.at) + ', so they’re current. A check can be asked for every 10 minutes.'
+      MKT.note = d.skipped && d.failed ? 'Couldn’t check: ' + d.failed + ' That was ' + ago(d.failedAt) + ', so the relay is giving aion2.exchange a few minutes before asking again.'
+        : d.skipped ? 'Prices were checked ' + ago(d.at) + ', so they’re current. A check can be asked for every 10 minutes.'
         : 'Checked ' + plural(d.checked, 'item') + ': ' + plural(d.changed, 'price') + ' changed' + (d.missing ? ', ' + plural(d.missing, 'item') + ' had no listings' : '') + '.' + (d.alerts ? ' ' + plural(d.alerts, 'price alert') + ' went off.' : '');
     } catch (e) { MKT.note = 'Couldn’t check: ' + e.message; }
     MKT.asking = false; render();

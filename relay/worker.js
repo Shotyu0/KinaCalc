@@ -20,6 +20,7 @@ const KEEP = 1800;         // seconds an answer is kept for members asking close
 const AGAIN = 10 * 60e3;   // a member's check runs at most this often
 const HITS = 30;           // fired alerts kept per member
 const JUMP = 5;            // a price this many times off its usual one is labelled, as on the page
+const WAIT = 20e3;         // how long to wait for aion2.exchange's answer
 
 // Without the PRICES store, answers are kept in this copy of the Worker only.
 const memo = new Map(), members = new Map();
@@ -47,11 +48,16 @@ export default {
         const r = await discord(url, '**Kina Ledger** is connected. Your price alerts will be posted here.');
         return r.ok ? reply(200, { ok: true }) : reply(502, { error: 'Discord answered ' + r.status + '. Check the webhook link.' });
       }
-      const token = await googleToken(env);
-      const last = (await fsGet(token, [DOCS + 'market/status'], ['at'])).get(DOCS + 'market/status');
-      if (last && last.at > Date.now() - AGAIN) return reply(200, { skipped: true, at: last.at });
+      const token = await googleToken(env), now = Date.now();
+      const last = (await fsGet(token, [DOCS + 'market/status'], ['at', 'failedAt', 'failed'])).get(DOCS + 'market/status') || {};
+      if (last.at > now - AGAIN) return reply(200, { skipped: true, at: last.at });
+      // aion2.exchange failed moments ago: say why instead of asking it again while it's down.
+      if (last.failedAt > now - AGAIN && !(last.at > last.failedAt)) return reply(200, { skipped: true, at: last.at || null, failedAt: last.failedAt, failed: String(last.failed || '') });
       return reply(200, await run(env, ctx, 'member'));
-    } catch (e) { return reply(502, { error: e.message }); }
+    } catch (e) {
+      console.error((path === '/refresh' ? 'Check' : 'Discord test') + ' failed: ' + e.message);
+      return reply(502, { error: e.message });
+    }
   },
   async scheduled(event, env, ctx) {
     ctx.waitUntil(run(env, ctx, 'hourly').catch(e => console.error('Hourly check failed: ' + e.message)));
@@ -67,12 +73,20 @@ async function run(env, ctx, why) {
   const keyed = items.filter(it => typeof it.marketKey === 'string' && KEY.test(it.marketKey) && !it.unavailable);
   const keys = [...new Set(keyed.map(it => it.marketKey))].sort();
   const seen = new Map();
-  for (let i = 0; i < keys.length; i += BATCH) {
-    const d = await askMarket(env, ctx, server, keys.slice(i, i + BATCH), why === 'hourly');
-    for (const x of d && Array.isArray(d.items) ? d.items : []) {
-      const k = String(x && x.item_key), p = Number(x && x.price);
-      if (KEY.test(k) && x.listed !== false && p > 0 && isFinite(p)) seen.set(k, p);
+  try {
+    for (let i = 0; i < keys.length; i += BATCH) {
+      const d = await askMarket(env, ctx, server, keys.slice(i, i + BATCH), why === 'hourly');
+      for (const x of d && Array.isArray(d.items) ? d.items : []) {
+        const k = String(x && x.item_key), p = Number(x && x.price);
+        if (KEY.test(k) && x.listed !== false && p > 0 && isFinite(p)) seen.set(k, p);
+      }
     }
+  } catch (e) {
+    // Nothing is saved from a check that didn't get every price. The page shows why it failed.
+    if (e.market) await gfetch(token, FS + ':commit', { method: 'POST', body: JSON.stringify({ writes: [{
+      update: { name: DOCS + 'market/status', fields: fields({ failedAt: Date.now(), failed: e.message }) },
+      updateMask: { fieldPaths: ['failedAt', 'failed'] } }] }) }).catch(() => {});
+    throw e;
   }
   const changed = keyed.filter(it => seen.has(it.marketKey) && seen.get(it.marketKey) !== it.price)
     .map(it => ({ id: it.id, path: it.path, name: String(it.name || it.id), old: it.price > 0 ? it.price : null, at: it.updatedAt, p: seen.get(it.marketKey) }));
@@ -145,16 +159,27 @@ async function askMarket(env, ctx, server, keys, fresh) {
     body = kept && kept.until > Date.now() ? kept.body : null;
     if (!body && kv) body = await kv.get(id);
   }
-  if (!body) {
-    const r = await fetch(UPSTREAM + path, { headers: { 'User-Agent': UA, 'Accept': 'application/json' } });
-    if (!r.ok) throw new Error('aion2.exchange answered ' + r.status + '.');
-    body = await r.text();
-    if (kv) ctx.waitUntil(kv.put(id, body, { expirationTtl: KEEP }));
-    if (memo.size > 200) memo.clear();
-    memo.set(id, { body: body, until: Date.now() + KEEP * 1000 });
+  if (body) return JSON.parse(body);
+  let r;
+  try { r = await fetch(UPSTREAM + path, { headers: { 'User-Agent': UA, 'Accept': 'application/json' }, signal: AbortSignal.timeout(WAIT) }); }
+  catch (e) { throw marketError('aion2.exchange didn’t answer' + (e && e.name === 'TimeoutError' ? ' within ' + WAIT / 1000 + ' seconds' : ' (' + (e && e.message) + ')') + '.'); }
+  if (!r.ok) {
+    const text = await r.text().catch(() => '');
+    const gate = r.headers.get('cf-mitigated') === 'challenge' || /<title>Just a moment|challenge-platform/i.test(text);
+    console.error('aion2.exchange answered ' + r.status + ' (cf-ray ' + (r.headers.get('cf-ray') || '-') + ', retry-after ' + (r.headers.get('retry-after') || '-') + '): ' + text.replace(/\s+/g, ' ').slice(0, 300));
+    throw marketError(gate ? 'aion2.exchange asked for a browser check, which the relay can’t pass.'
+      : r.status === 429 ? 'aion2.exchange says it has had too many requests (429).'
+      : 'aion2.exchange answered ' + r.status + (r.status >= 500 ? ': the site is down or overloaded right now' : '') + '.');
   }
-  return JSON.parse(body);
+  body = await r.text();
+  let d;
+  try { d = JSON.parse(body); } catch (_) { throw marketError('aion2.exchange sent something other than prices.'); }
+  if (kv) ctx.waitUntil(kv.put(id, body, { expirationTtl: KEEP }));
+  if (memo.size > 200) memo.clear();
+  memo.set(id, { body: body, until: Date.now() + KEEP * 1000 });
+  return d;
 }
+function marketError(message) { const e = new Error(message); e.market = true; return e; }
 
 // A member is someone signed in whose own record in `members` they can read. Firestore checks the
 // token's signature and the access rules. A token that passed is remembered until it expires.

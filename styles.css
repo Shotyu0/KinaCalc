@@ -389,3 +389,4 @@ details.ref .mini { max-width: 360px; margin-top: 10px; }
 .gr-epic { color: var(--g-epic); }
 .gr-unique { color: var(--g-unique); }
 .sub.stale { color: var(--warn); }
+.help.warn-text { color: var(--warn); }
