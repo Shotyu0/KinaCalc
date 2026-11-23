@@ -189,7 +189,7 @@ async function askMarket(env, ctx, server, keys, fresh, plan) {
   if (!r.ok) {
     const text = await r.text().catch(() => '');
     const gate = r.headers.get('cf-mitigated') === 'challenge' || /<title>Just a moment|challenge-platform/i.test(text);
-    console.error('aion2.exchange answered ' + r.status + ' for ' + keys.length + ' items (cf-ray ' + (r.headers.get('cf-ray') || '-') + ', retry-after ' + (r.headers.get('retry-after') || '-') + '): ' + text.replace(/\s+/g, ' ').slice(0, 300));
+    console.error('aion2.exchange answered ' + r.status + ' for ' + keys.length + ' items (cf-ray ' + (r.headers.get('cf-ray') || '-') + ', retry-after ' + (r.headers.get('retry-after') || '-') + '): ' + text.replace(/\s+/g, ' ').slice(0, 300) + ' · asked ' + UPSTREAM + path);
     const e = marketError(gate ? 'aion2.exchange asked for a browser check, which the relay can’t pass.'
       : r.status === 429 ? 'aion2.exchange says it has had too many requests (429).'
       : 'aion2.exchange answered ' + r.status + (r.status >= 500 ? ': the site is down or overloaded right now' : '') + '.', !gate && [500, 502, 503, 504].includes(r.status));
