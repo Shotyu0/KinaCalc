@@ -64,13 +64,13 @@
     gather: { short: 'With own gathering', hint: 'Materials you mark as gatherable cost nothing. This is the Kina you actually take home.' },
     opp: { short: 'Gain vs selling raw', hint: 'Gathered materials count at what they would sell for after the fee. Above zero means crafting beats selling the raw materials.' }
   };
-  const ROUTE = { buy: 'Market', vendor: 'NPC', gather: 'Gather', craft: 'Craft', combo: 'Combo', missing: 'No price' };
+  const ROUTE = { buy: 'Market', world: 'World Market', vendor: 'NPC', gather: 'Gather', craft: 'Craft', combo: 'Combo', missing: 'No price' };
   const ID_RE = /^[A-Za-z0-9_\-.~:@+]{1,160}$/;
   const MARKET_KEY = /^\d{9}$/;
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
   let GATHERABLE = null; // names of materials gathered from nodes, from data/gather-icons.json
-  const BUILD = '2026-11-21a'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-11-23a'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -134,10 +134,11 @@
     return total > 50 ? 'Professional Lv ' + (total - 50) : 'Novice Lv ' + total;
   }
   function mergeSettings(d) {
-    const s = { tax: 10, listFee: 2, failLoss: 100, levels: {}, showPending: false, runs: [], crafts: [], craftMin: null };
+    const s = { tax: 10, worldTax: 20, listFee: 2, failLoss: 100, levels: {}, showPending: false, runs: [], crafts: [], craftMin: null };
     if (d && typeof d === 'object') {
       s.showPending = !!d.showPending;
       if (num(d.tax) != null) s.tax = num(d.tax);
+      if (num(d.worldTax) != null) s.worldTax = num(d.worldTax);
       if (num(d.listFee) != null) s.listFee = num(d.listFee);
       if (num(d.failLoss) != null) s.failLoss = num(d.failLoss);
       s.levels = readLevels(d.levels);
@@ -471,7 +472,7 @@
     gatherShow: '', gatherQ: '', gOpen: null, runDraft: null, gatherOdds: 'exp', gatherNoBreaks: false
   }, readUI());
   UI.editor = null; UI.editorErr = []; UI.editorFrom = 'recipes';
-  UI.shots = { status: 'idle', market: null, source: null, pasteText: '', pasteNote: '' };
+  UI.shots = { status: 'idle', market: null, source: null, pasteText: '', pasteNote: '', world: false };
   UI.newItem = { name: '', price: '', gather: false };
   UI.io = { exportText: '', importText: '', msg: '' };
   UI.confirm = null;
@@ -489,6 +490,9 @@
     const it = { id: id, name: String(x.name == null ? id : x.name).trim(), price: num(x.price), vendor: num(x.vendor), gather: !!x.gather, bound: !!x.bound, unavailable: !!x.unavailable, updatedAt: num(x.updatedAt), hist: readHist(x.hist).slice(-HIST_MAX), example: !!x.example };
     // The item's 9-digit key on aion2.exchange, learned from a pasted table. Left off when unknown.
     if (MARKET_KEY.test(x.marketKey)) it.marketKey = x.marketKey;
+    // Its lowest price on the World Market, which pools every server of your faction and region, and
+    // that price's history. Left off until someone enters one.
+    if (num(x.world) > 0 || readHist(x.wHist).length) Object.assign(it, { world: num(x.world) > 0 ? num(x.world) : null, worldAt: num(x.worldAt), wHist: readHist(x.wHist).slice(-HIST_MAX) });
     return it;
   }
   function readRecipe(id, x) {
@@ -595,15 +599,24 @@
   function nameHTML(id) { return '<span class="' + (GRADE_CLASS[itemGrade(id)] || 'gr-none') + '">' + esc(itemName(id)) + '</span>'; }
   // An item's listed price and how long ago it was entered, flagged when it's over a day old.
   function priceLine(id, prefix) {
-    const it = getItem(id);
-    if (!it || !(num(it.price) > 0)) return '<div class="sub">' + esc(prefix || '') + 'no price</div>';
+    const it = getItem(id), w = worldLine(it, prefix);
+    if (!it || !(num(it.price) > 0)) return w || '<div class="sub">' + esc(prefix || '') + 'no price</div>';
     const pi = priceInfo(it);
     if (pi.doubtful) {
-      return '<div class="sub stale" title="' + esc(doubtText(pi.latest, pi.usual)) + '">' + esc(prefix || '') + k(pi.latest) + ' looks wrong · using ' + k(pi.usual) + '</div>';
+      return '<div class="sub stale" title="' + esc(doubtText(pi.latest, pi.usual)) + '">' + esc(prefix || '') + k(pi.latest) + ' looks wrong · using ' + k(pi.usual) + '</div>' + w;
     }
     const seen = seenAt(it), old = !seen || Date.now() - seen > DAY;
     return '<div class="sub' + (old ? ' stale' : '') + '" title="' + esc(seen ? 'Current as of ' + when(seen) : 'No date recorded') + '">' +
-      esc(prefix || '') + k(it.price) + ' · ' + (seen ? ago(seen) : 'no date') + '</div>';
+      esc(prefix || '') + k(it.price) + ' · ' + (seen ? ago(seen) : 'no date') + '</div>' + w;
+  }
+  // The same line for the item's World Market price, when it has one.
+  function worldLine(it, prefix) {
+    const wi = worldInfo(it);
+    if (!wi || !(wi.latest > 0)) return '';
+    const label = esc(prefix || '') + 'World ';
+    if (wi.doubtful) return '<div class="sub stale" title="' + esc('World Market: ' + doubtText(wi.latest, wi.usual)) + '">' + label + k(wi.latest) + ' looks wrong · using ' + k(wi.usual) + '</div>';
+    const at = num(it.worldAt), old = !at || Date.now() - at > DAY;
+    return '<div class="sub' + (old ? ' stale' : '') + '" title="' + esc(at ? 'World Market price from ' + when(at) : 'No date recorded') + '">' + label + k(wi.latest) + ' · ' + (at ? ago(at) : 'no date') + '</div>';
   }
   function doubtText(price, usual) {
     return price >= usual ? NF0.format(Math.round(price / usual)) + '× its usual ' + k(usual) : 'under a fifth of its usual ' + k(usual);
@@ -633,9 +646,9 @@
     return h;
   }
   // Whether a price about to be saved looks wrong, and why.
-  function newPriceDoubt(it, price, C) {
+  function newPriceDoubt(it, price, C, world) {
     if (!it || !(price > 0)) return null;
-    const recent = histOf(it).slice(-10).map(x => x.p).filter(p => p > 0);
+    const recent = (world ? wHistOf(it) : histOf(it)).slice(-10).map(x => x.p).filter(p => p > 0);
     if (recent.length && jumped(price, median(recent))) return doubtText(price, median(recent));
     let cheapest = Infinity;
     for (const r of (C && C.prod.get(it.id)) || []) {
@@ -644,9 +657,9 @@
     }
     return isFinite(cheapest) && price >= DOUBT_COST * cheapest ? NF0.format(Math.round(price / cheapest)) + '× what it costs to craft (' + k(cheapest) + ')' : null;
   }
-  function priceAge(id) {
+  function priceAge(id, world) {
     const it = getItem(id);
-    const seen = seenAt(it);
+    const seen = world ? it && num(it.worldAt) : seenAt(it);
     if (!seen) return '';
     return '<div class="sub' + (Date.now() - seen > DAY ? ' stale' : '') + '">' + ago(seen) + '</div>';
   }
@@ -656,6 +669,20 @@
     const part = rc.pCombo * rc.comboQty * rc.comboNet;
     const without = rc.outNet == null ? NaN : rc.pS * rc.outQty * rc.outNet - rc.attemptCost;
     return { share: part / rc.revenue, without: without, driven: rc.profit > 0 && (part / rc.revenue >= 0.5 || without < 0) };
+  }
+  // An item's World Market price in a breakdown, when it has one.
+  function worldDT(it) {
+    const wi = worldInfo(it);
+    if (!wi || !(wi.latest > 0)) return '';
+    return '<dt>World Market price</dt><dd>' + k(wi.latest) + '</dd>' + (wi.doubtful ? '<dd class="why">That’s ' + esc(doubtText(wi.latest, wi.usual)) + ' there, so the math uses ' + k(wi.usual) + '.</dd>' : '') +
+      '<dd class="why">' + (num(it.worldAt) ? 'Entered ' + esc(ago(it.worldAt)) + '. ' : '') + 'Its sales fee is ' + k(S.settings.worldTax) + '%, so selling there only pays when it lists for clearly more.</dd>';
+  }
+  // Which of a craft's results sell on the World Market, where they net more even after its higher fee.
+  function soldWhereHTML(rc, outName, comboName) {
+    const names = [];
+    if (rc.outWorld) names.push(outName);
+    if (rc.comboWorld && !rc.sameCombo && rc.pCombo > 0) names.push(comboName);
+    return names.length ? '<dd class="why">' + esc(names.join(' and ')) + (names.length > 1 ? ' sell' : ' sells') + ' on the World Market here: it nets more there even after the ' + k(S.settings.worldTax) + '% sales fee.</dd>' : '';
   }
   function findItem(name) { return reg().byName.get(norm(name)) || null; }
   function ensureItem(name) {
@@ -708,20 +735,63 @@
     if (h.length) return h;
     return it && num(it.price) > 0 && it.updatedAt ? [{ t: it.updatedAt, p: it.price }] : [];
   }
+  // A price history with one more reading. Readings minutes apart count as one.
+  function addReading(hist, price, ts) {
+    hist = hist.slice();
+    const last = hist[hist.length - 1];
+    if (last && ts - last.t < HIST_MERGE_MS && ts >= last.t) hist[hist.length - 1] = { t: ts, p: price };
+    else hist.push({ t: ts, p: price });
+    hist.sort((a, b) => a.t - b.t);
+    return hist.length > HIST_MAX ? hist.slice(-HIST_MAX) : hist;
+  }
   // Returns a copy of the item with a new current price, logged in its price history.
   function withPrice(it, price, ts) {
     ts = ts || Date.now();
-    let hist = histOf(it).slice();
-    if (price != null) {
-      const last = hist[hist.length - 1];
-      if (last && ts - last.t < HIST_MERGE_MS && ts >= last.t) hist[hist.length - 1] = { t: ts, p: price };
-      else hist.push({ t: ts, p: price });
-      hist.sort((a, b) => a.t - b.t);
-      if (hist.length > HIST_MAX) hist = hist.slice(-HIST_MAX);
-    }
+    const hist = price != null ? addReading(histOf(it), price, ts) : histOf(it).slice();
     const next = Object.assign({}, it, { price: price, updatedAt: price == null ? it.updatedAt : ts, hist: hist, example: false });
     delete next.virtual;
     return next;
+  }
+
+  // The World Market price, kept beside the server's with its own history and the same doubt check.
+  // Nothing refreshes it yet, so it's as current as the last time someone entered or pasted it.
+  function wHistOf(it) {
+    const h = it && Array.isArray(it.wHist) ? it.wHist : [];
+    if (h.length) return h;
+    return it && num(it.world) > 0 && it.worldAt ? [{ t: it.worldAt, p: it.world }] : [];
+  }
+  const worldMemo = { v: -1, map: new Map() };
+  function worldInfo(it) {
+    if (!it) return null;
+    if (worldMemo.v !== itemsVer) { worldMemo.v = itemsVer; worldMemo.map = new Map(); }
+    let info = worldMemo.map.get(it.id);
+    if (info) return info;
+    const p = num(it.world) > 0 ? num(it.world) : null;
+    const earlier = p ? wHistOf(it).slice(0, -1).slice(-10).map(x => x.p).filter(v => v > 0) : [];
+    const usual = earlier.length ? median(earlier) : null, doubtful = jumped(p, usual);
+    info = { latest: p, usual: usual, doubtful: doubtful, use: doubtful ? usual : p };
+    worldMemo.map.set(it.id, info);
+    return info;
+  }
+  function withWorld(it, price, ts) {
+    ts = ts || Date.now();
+    const next = Object.assign({}, it, { world: price, worldAt: price == null ? (it.worldAt || null) : ts,
+      wHist: price != null ? addReading(wHistOf(it), price, ts) : wHistOf(it).slice(), example: false });
+    delete next.virtual;
+    return next;
+  }
+  // Where an item is cheapest to buy: { p, world }, or null when neither market has a price.
+  function buyAt(it) {
+    if (!it || it.bound) return null;
+    const a = priceInfo(it).use, b = worldInfo(it).use;
+    if (!(a > 0) && !(b > 0)) return null;
+    return b > 0 && !(a > 0 && a <= b) ? { p: b, world: true } : { p: a, world: false };
+  }
+  // Whether anyone has entered a World Market price yet.
+  const worldSeen = { v: -1, any: false };
+  function worldPrices() {
+    if (worldSeen.v !== itemsVer) { worldSeen.v = itemsVer; worldSeen.any = [...S.items.values()].some(it => num(it.world) > 0); }
+    return worldSeen.any;
   }
 
   /* ---------- storage: the shared Firestore price book for members, this browser otherwise ---------- */
@@ -827,14 +897,17 @@
     }
     return { p: floor.basic / 100, pc: floor.combo / 100, src: 'assumed', grade: grade };
   }
-  // The share of a sale's price lost to fees: the sales fee plus the listing fee, in percent.
-  function saleFees() {
+  // The share of a sale's price lost to fees: the sales fee plus the listing fee, in percent. The World
+  // Market's sales fee is higher; the listing fee is the same on both.
+  function saleFees(world) {
     const s = S.settings;
-    return (num(s.tax) == null ? 10 : num(s.tax)) + (num(s.listFee) == null ? 2 : num(s.listFee));
+    const tax = world ? (num(s.worldTax) == null ? 20 : num(s.worldTax)) : (num(s.tax) == null ? 10 : num(s.tax));
+    return tax + (num(s.listFee) == null ? 2 : num(s.listFee));
   }
   function feesTxt() {
     const s = S.settings;
-    return num(s.listFee) > 0 ? 'the ' + k(s.tax) + '% sales fee and ' + k(s.listFee) + '% listing fee' : 'the ' + k(s.tax) + '% sales fee';
+    const sale = 'the ' + k(s.tax) + '% sales fee' + (worldPrices() ? ' (' + k(s.worldTax) + '% on the World Market)' : '');
+    return num(s.listFee) > 0 ? sale + ' and ' + k(s.listFee) + '% listing fee' : sale;
   }
   function canCraft(r) {
     if (r.level == null) return true;
@@ -845,15 +918,19 @@
   // scn: 'buy' = purchase everything, 'gather' = gatherable mats are free, 'opp' = gatherable mats cost their after-fee sell value
   function engine(scn, prod, comboMakers) {
     // What a sale keeps: every sale pays the sales fee, and listing it paid the listing fee, both as a share of the price.
-    const tax = clamp01(saleFees() / 100);
+    const tax = clamp01(saleFees() / 100), wtax = clamp01(saleFees(true) / 100);
     const loss = clamp01((num(S.settings.failLoss) == null ? 100 : num(S.settings.failLoss)) / 100);
     const mu = new Map(), mr = new Map(), stack = new Set();
-    function netSell(id) {
+    // Where an item sells for the most after fees: its server's market or the World Market.
+    function sellAt(id) {
       const it = getItem(id);
       if (!it || it.bound) return null;
-      const p = priceInfo(it).use;
-      return p > 0 ? p * (1 - tax) : null;
+      const p = priceInfo(it).use, w = worldInfo(it).use;
+      const here = p > 0 ? p * (1 - tax) : null, there = w > 0 ? w * (1 - wtax) : null;
+      if (here == null && there == null) return null;
+      return there != null && !(here != null && here >= there) ? { net: there, world: true } : { net: here, world: false };
     }
+    function netSell(id) { const s = sellAt(id); return s ? s.net : null; }
     function unit(id) {
       if (mu.has(id)) return mu.get(id);
       const it = getItem(id);
@@ -861,6 +938,7 @@
       if (it) {
         if (scn !== 'buy' && isGathered(it)) opts.push({ route: 'gather', cost: scn === 'gather' ? 0 : (netSell(id) || 0) });
         const p = priceInfo(it).use; if (p > 0 && !it.bound) opts.push({ route: 'buy', cost: p });
+        const w = worldInfo(it).use; if (w > 0 && !it.bound) opts.push({ route: 'world', cost: w });
         const v = num(it.vendor); if (v > 0) opts.push({ route: 'vendor', cost: v });
       }
       const inCycle = stack.has(id);
@@ -909,8 +987,8 @@
       const consumeC = cs + (1 - cs) * loss;
       const base = priceMats(r.mats);
       const cm = priceMats(r.comboMats);
-      const outNet = netSell(r.output);
-      const comboNet = sameCombo ? outNet : netSell(comboId);
+      const outSell = sellAt(r.output), comboSell = sameCombo ? outSell : sellAt(comboId);
+      const outNet = outSell ? outSell.net : null, comboNet = comboSell ? comboSell.net : null;
       const fee = Math.max(0, num(r.fee) || 0);
       // With combo materials the combo is an optional second craft: it keeps the normal result and is
       // taken only when it is worth more than its materials. Without them the combo item is a free upgrade.
@@ -935,12 +1013,15 @@
       const revenue = outNet == null ? NaN : pBase * outQty * outNet + pCombo * comboQty * (comboNet || 0);
       const profit = revenue - attemptCost;
       const roi = attemptCost > 0 ? profit / attemptCost : (isFinite(profit) && profit > 0 ? Infinity : NaN);
-      const breakEven = isFinite(unitCost) && tax < 1 ? unitCost / (1 - tax) : NaN;
+      // The list price that covers the cost, on the market it sells best on.
+      const outWorld = !!(outSell && outSell.world), sellTax = outWorld ? wtax : tax;
+      const breakEven = isFinite(unitCost) && sellTax < 1 ? unitCost / (1 - sellTax) : NaN;
       const res = {
         r: r, sr: sr, pS: pS, c: c, cs: cs, pCombo: pCombo, pBase: pBase, outQty: outQty, comboId: comboId, sameCombo: sameCombo, comboQty: comboQty,
         consume: consume, consumeC: consumeC, loss: loss, mats: base.mats, missing: base.missing, matCost: base.cost,
         cmats: cm.mats, comboMatCost: cm.cost, extraCombo: extraCombo, comboTaken: comboTaken, comboWhy: comboWhy, comboCost: comboCost,
         fee: fee, attemptCost: attemptCost, units: units, outNet: outNet, comboNet: comboNet, comboMissing: comboMissing,
+        outWorld: outWorld, comboWorld: !!(comboSell && comboSell.world),
         unitCost: unitCost, revenue: revenue, profit: profit, roi: roi, breakEven: breakEven
       };
       mr.set(r.id, res);
@@ -949,16 +1030,18 @@
     // Crafting the base item until it procs its combo item, selling the normal items made along the way.
     function chase(r) {
       const rc = recipe(r);
-      const baseNet = netSell(r.output);
+      const baseSell = sellAt(r.output), comboSell = sellAt(rc.comboId);
+      const baseNet = baseSell ? baseSell.net : null;
       const credit = rc.pBase * rc.outQty * (baseNet || 0);
       const per = rc.pCombo * rc.comboQty;
       const cost = per > 0 && isFinite(rc.attemptCost) ? (rc.attemptCost - credit) / per : NaN;
-      const net = netSell(rc.comboId);
+      const net = comboSell ? comboSell.net : null;
       const profit = net == null ? NaN : net - cost;
       const roi = cost > 0 ? profit / cost : (isFinite(profit) && profit > 0 ? Infinity : NaN);
-      return { kind: 'combo', rc: rc, sr: rc.sr, pS: per, c: rc.c, cost: cost, unitCost: cost, credit: credit, baseNet: baseNet, revenue: net == null ? NaN : net, outNet: net, profit: profit, roi: roi, missing: rc.missing };
+      return { kind: 'combo', rc: rc, sr: rc.sr, pS: per, c: rc.c, cost: cost, unitCost: cost, credit: credit, baseNet: baseNet, revenue: net == null ? NaN : net, outNet: net, profit: profit, roi: roi, missing: rc.missing,
+        baseWorld: !!(baseSell && baseSell.world), outWorld: !!(comboSell && comboSell.world) };
     }
-    return { unit: unit, recipe: recipe, chase: chase, netSell: netSell };
+    return { unit: unit, recipe: recipe, chase: chase, netSell: netSell, sellAt: sellAt };
   }
   function buildCalc() {
     const recipes = allRecipes();
@@ -1337,7 +1420,7 @@
       '<dt>Splendent per craft</dt><dd>' + pct(ch.pS) + '</dd>' +
       '<dt>Crafts per Splendent</dt><dd>≈ ' + qfmt(tries) + '</dd>' +
       '<dt>Normal items along the way</dt><dd>≈ ' + qfmt(rc.pBase * rc.outQty * tries) + '</dd><dd class="why">' +
-      (ch.baseNet != null ? esc(baseName) + ' sold at ' + k(ch.baseNet) + ' each after the fee.' : esc(baseName) + ' has no market price, so they count as 0. Add its price to lower the cost.') + '</dd></dl>';
+      (ch.baseNet != null ? esc(baseName) + ' sold' + (ch.baseWorld ? ' on the World Market' : '') + ' at ' + k(ch.baseNet) + ' each after the fee.' : esc(baseName) + ' has no market price, so they count as 0. Add its price to lower the cost.') + '</dd></dl>';
     const mats = '<div class="mini-well"><table class="mini"><thead><tr><th>Material</th><th class="num">Qty</th><th>Source</th><th class="num">Each</th><th class="num">Total</th><th class="c">Gather</th></tr></thead><tbody>' +
       treeRows(E, base.mats, rc, 0, rc.consume * tries, new Set([base.id])) + '</tbody></table></div>' +
       '<dl class="kv tot"><dt>Materials and fees, ' + qfmt(tries) + ' crafts</dt><dd>' + k(rc.attemptCost * tries) + '</dd>' +
@@ -1345,16 +1428,17 @@
       '<dt>Cost per Splendent</dt><dd><strong>' + k(ch.cost) + '</strong></dd>' +
       (ch.cost < 0 ? '<dd class="why">Below zero: the normal items sell for more than the materials, so the Splendent is a bonus.</dd>' : '') + '</dl>';
     const users = C.rows.filter(x => x.r.mats.some(m => m.item === row.r.output));
-    let use = '<dl class="kv"><dt>Listed price</dt><dd>' + (out && num(out.price) > 0 ? k(out.price) : '—') + '</dd>' +
-      '<dt>Sold, after the fee</dt><dd>' + k(ch.outNet) + '</dd>' +
+    let use = '<dl class="kv"><dt>Listed price</dt><dd>' + (out && num(out.price) > 0 ? k(out.price) : '—') + '</dd>' + worldDT(out) +
+      '<dt>Sold' + (ch.outWorld ? ' on the World Market' : '') + ', after the fee</dt><dd>' + k(ch.outNet) + '</dd>' +
       '<dt>Profit per Splendent sold</dt><dd class="' + tone(ch.profit) + '"><strong>' + sk(ch.profit) + '</strong></dd></dl>';
     if (users.length) {
       use += '<p class="help">Or keep it to craft:</p><ul class="uses">' + users.map(x => {
         const m = x[scn].mats.find(mm => mm.item === row.r.output);
-        const how = m.route === 'combo' ? 'making your own Splendent' : m.route === 'buy' ? 'buying the Splendent, since that’s cheaper' : 'no Splendent price yet';
+        const how = m.route === 'combo' ? 'making your own Splendent' : m.route === 'buy' || m.route === 'world' ? 'buying the Splendent' + (m.route === 'world' ? ' on the World Market' : '') + ', since that’s cheaper' : 'no Splendent price yet';
         return '<li><button class="linkbtn" data-act="goto-recipe" data-id="' + esc(x.r.id) + '">' + esc(itemName(x.r.output)) + '</button>: <span class="' + tone(x[scn].profit) + '">' + sk(x[scn].profit) + '</span> per craft, ' + how + '</li>';
       }).join('') + '</ul>';
-      if (out && num(out.price) > 0) use += '<p class="note">If you’d craft the next tier anyway, keeping it is worth the full ' + k(out.price) + ' you’d pay to buy one. Selling it nets ' + k(ch.outNet) + ' after the fee.</p>';
+      const cheapest = buyAt(out);
+      if (cheapest) use += '<p class="note">If you’d craft the next tier anyway, keeping it is worth the full ' + k(cheapest.p) + ' you’d pay to buy one' + (cheapest.world ? ' on the World Market' : '') + '. Selling it nets ' + k(ch.outNet) + ' after the fee.</p>';
     } else use += '<p class="help">No released recipe uses ' + esc(name) + ' as a material.</p>';
     return '<div class="dgrid">' +
       '<div class="dcard"><h4>Odds</h4>' + odds + '</div>' +
@@ -1397,9 +1481,9 @@
     if (rc.c > 0 && !rc.sameCombo && rc.pCombo > 0) odds += '<dt>Combo items per attempt</dt><dd>' + qfmt(rc.pCombo * rc.comboQty) + ' × ' + esc(comboName) + '</dd>';
     const covered = rc.unitCost < 0; // the combo items alone earn more than every craft costs
     odds += '</dl><dl class="kv tot"><dt>Cost per item made</dt><dd>' + (covered ? '0' : k(rc.unitCost)) + '</dd>' +
-      '<dt>Break-even list price</dt><dd>' + (covered ? 'Any price' : k(rc.breakEven)) + '</dd>' +
+      '<dt>Break-even list price' + (rc.outWorld && !covered ? ' on the World Market' : '') + '</dt><dd>' + (covered ? 'Any price' : k(rc.breakEven)) + '</dd>' +
       (covered ? '<dd class="why">The ' + esc(comboName) + ' procs alone earn more than the materials cost, so the normal items are pure profit at any price.</dd>' : '') +
-      '<dt>Current list price</dt><dd>' + (out && num(out.price) > 0 ? k(out.price) : '—') + '</dd>' + listDoubtHTML(row, out) +
+      '<dt>Current list price</dt><dd>' + (out && num(out.price) > 0 ? k(out.price) : '—') + '</dd>' + listDoubtHTML(row, out) + worldDT(out) +
       (out && histOf(out).length > 1 ? '<dd class="why" style="text-align:right">' + sparkHTML(out) + '</dd>' : '') + '</dl>';
 
     let rowsHTML = treeRows(E, r.mats, rc, 0, 1, new Set([r.id]));
@@ -1414,7 +1498,7 @@
       (rc.comboCost ? '<dt>Combo materials, expected</dt><dd>' + k(rc.comboCost) + '</dd>' : '') +
       (rc.fee ? '<dt>Crafting fee</dt><dd>' + k(rc.fee) + '</dd>' : '') +
       '<dt>Cost per attempt</dt><dd><strong>' + k(rc.attemptCost) + '</strong></dd>' +
-      '<dt>Expected sales after fee</dt><dd>' + k(rc.revenue) + '</dd>' +
+      '<dt>Expected sales after fee</dt><dd>' + k(rc.revenue) + '</dd>' + soldWhereHTML(rc, outName, comboName) +
       '<dt>Profit per attempt</dt><dd class="' + tone(rc.profit) + '"><strong>' + sk(rc.profit) + '</strong></dd></dl>';
 
     return '<div class="dgrid">' +
@@ -1457,7 +1541,7 @@
       const batch = m.route === 'craft' && getRecipe(m.recipe) && getRecipe(m.recipe).outQty > 1 ? getRecipe(m.recipe).outQty : 0;
       h += '<tr class="' + (depth ? 'subrow' : '') + '"><td><span class="indent" style="--d:' + depth + '"></span>' + (depth ? '↳ ' : '') + nameHTML(m.item) +
         (batch ? ' <span class="muted">(made ' + batch + ' per craft; ↳ rows are this craft’s share)</span>' : '') + '</td>' +
-        '<td class="num">' + qfmt(q) + '</td><td>' + routeTag(m.route) + '</td><td class="num">' + k(m.cost) + (m.route === 'buy' ? priceAge(m.item) : '') + '</td><td class="num">' + k(q * m.cost) + '</td><td class="c">' + gatherBox(m.item, m.route) + '</td></tr>';
+        '<td class="num">' + qfmt(q) + '</td><td>' + routeTag(m.route) + '</td><td class="num">' + k(m.cost) + (m.route === 'buy' || m.route === 'world' ? priceAge(m.item, m.route === 'world') : '') + '</td><td class="num">' + k(q * m.cost) + '</td><td class="c">' + gatherBox(m.item, m.route) + '</td></tr>';
       const sub = m.route === 'craft' || m.route === 'combo' ? getRecipe(m.recipe) : null;
       if (sub && depth < 4 && !path.has(sub.id)) {
         const src = E.recipe(sub);
@@ -1498,12 +1582,12 @@
   function shopList(E, r, crafts) {
     const acc = { leaves: new Map(), subs: new Map(), fees: 0 };
     walk(E, r, crafts, acc, 0, new Set([r.id]));
-    const order = { gather: 0, buy: 1, vendor: 2, missing: 3 };
+    const order = { gather: 0, buy: 1, world: 2, vendor: 3, missing: 4 };
     const leaves = [...acc.leaves.values()].sort((a, b) => (order[a.route] - order[b.route]) || itemName(a.item).localeCompare(itemName(b.item)));
     let spend = acc.fees, missing = false, body = '';
     for (const L of leaves) {
       const qty = Math.ceil(L.qty - 1e-6);
-      const pays = L.route === 'buy' || L.route === 'vendor';
+      const pays = L.route === 'buy' || L.route === 'world' || L.route === 'vendor';
       const kin = pays ? qty * L.unit : 0;
       if (pays) spend += kin;
       if (L.route === 'missing') missing = true;
@@ -1557,7 +1641,7 @@
       out += '<h4>Your odds</h4><div class="mini-well"><table class="mini"><thead><tr><th class="num">Crafts</th><th class="num">Chance of ' + n + '+</th><th class="num">Kina spent</th><th class="num">Normal items made</th></tr></thead><tbody>' +
         tries.map(t => '<tr><td class="num">' + t + '</td><td class="num">' + pct(atLeast(n, t, p)) + '</td><td class="num">' + (one.missing ? '—' : k(shopList(E, base, t).spend)) + '</td><td class="num">≈ ' + qfmt(t * rc.pBase * rc.outQty) + '</td></tr>').join('') +
         '</tbody></table></div><p class="note">On average it takes ' + qfmt(n / p) + ' crafts. Budget for ' + marks[2] + ' to be 90% sure. Kina spent doesn’t subtract the normal items you can sell' +
-        (ch.baseNet != null ? ' (' + k(ch.baseNet) + ' each after the fee)' : '') + '.</p>';
+        (ch.baseNet != null ? ' (' + k(ch.baseNet) + ' each after the fee' + (ch.baseWorld ? ' on the World Market' : '') + ')' : '') + '.</p>';
     }
     return out;
   }
@@ -1700,13 +1784,13 @@
   function needsPrice(it, used, C, outputs) {
     if (!used.has(it.id)) return false;
     if (C.E.gather.unit(it.id).route === 'missing') return true;
-    return outputs.has(it.id) && !it.bound && !(num(it.price) > 0);
+    return outputs.has(it.id) && !it.bound && !(num(it.price) > 0) && !(num(it.world) > 0);
   }
   // The Prices tab's rows for the current search, filter and sort.
   function priceItems(used, C, outputs) {
     const q = loose(UI.priceQuery);
     let items = UI.priceFilter === 'out' ? allItems().filter(it => it.unavailable) : allItems().filter(it => !it.virtual || used.has(it.id));
-    if (UI.priceFilter === 'priced') items = items.filter(it => num(it.price) > 0 || num(it.vendor) > 0);
+    if (UI.priceFilter === 'priced') items = items.filter(it => num(it.price) > 0 || num(it.vendor) > 0 || num(it.world) > 0);
     else if (UI.priceFilter === 'needs') items = items.filter(it => needsPrice(it, used, C, outputs));
     else if (UI.priceFilter === 'gather') items = items.filter(isGathered);
     if (q) items = items.filter(it => loose(it.name).indexOf(q) >= 0);
@@ -1723,7 +1807,8 @@
     const items = priceItems(used, C, outputs);
     const now = Date.now();
     let h = '<div class="toolbar"><h2 class="sec-h">Prices</h2><div class="row-gap"><button class="btn" data-act="tab" data-tab="shots">Paste a price list</button></div></div>' +
-      '<p class="help">Enter the lowest market price for one unit. You can type 1520, 1,520 or 1.5k. Every price you enter or paste is kept, so click an item’s name to see its price history. Tick <strong>Gather</strong> for anything you collect yourself' + (S.uid ? ' (your own list: friends tick theirs)' : '') + ', and <strong>Bound</strong> for items that can’t be sold on the market. Use the NPC column for vendor-only materials.</p>';
+      '<p class="help">Enter the lowest market price for one unit. You can type 1520, 1,520 or 1.5k. Every price you enter or paste is kept, so click an item’s name to see its price history. Tick <strong>Gather</strong> for anything you collect yourself' + (S.uid ? ' (your own list: friends tick theirs)' : '') + ', and <strong>Bound</strong> for items that can’t be sold on the market. Use the NPC column for vendor-only materials.</p>' +
+      '<p class="help">The <strong>World price</strong> is the item’s lowest price on the World Market, which trades with every server of your faction and region. Where an item has both, the math buys from whichever is cheaper and sells on whichever leaves more after fees: the World Market’s sales fee is ' + k(S.settings.worldTax) + '%, so selling there only pays when it lists for about ' + worldEdge() + '% more. World prices don’t refresh themselves yet, so enter or paste them when you check.</p>';
     h += alertsPanel();
     markHitsSeen();
     h += '<section class="panel"><div class="addrow">' +
@@ -1742,19 +1827,23 @@
     }
     if (!items.length) return h + '<section class="empty"><h2 class="sec-h">No items match</h2><p>' + (UI.priceQuery ? 'Nothing is named like “' + esc(UI.priceQuery) + '”.' : 'Try another filter.') + '</p></section>';
     const shown = items.slice(0, UI.priceShow);
-    h += '<div class="well"><table class="grid prices"><thead><tr><th>Item</th><th class="num w-num">Market price</th><th>Trend</th><th class="num w-num">NPC price</th><th class="c">Gather</th><th class="c">Bound</th><th class="num">Used in</th><th>Updated</th><th><span class="sr">Delete</span></th></tr></thead><tbody>';
+    h += '<div class="well"><table class="grid prices"><thead><tr><th>Item</th><th class="num w-num">Market price</th><th class="num w-num">World price</th><th>Trend</th><th class="num w-num">NPC price</th><th class="c">Gather</th><th class="c">Bound</th><th class="num">Used in</th><th>Updated</th><th><span class="sr">Delete</span></th></tr></thead><tbody>';
     for (const it of shown) {
       const id = esc(it.id), u = used.get(it.id) || 0, open = UI.priceOpen === it.id;
       const tags = [];
       if (it.example) tags.push(['ex', 'Example']);
       if (reg().unavail.has(it.id)) tags.push(['warn', 'Not in game']);
       if (priceInfo(it).doubtful) tags.push(['loss', 'Doubtful price']);
+      if (worldInfo(it).doubtful) tags.push(['loss', 'Doubtful World price']);
+      const better = worldBetter(it);
+      if (better) tags.push(['world', better]);
       else if (needsPrice(it, used, C, outputs)) tags.push(['warn', 'Needs a price']);
       if (S.alerts && S.alerts.rules[it.id]) tags.push(['', 'Alert at ' + alertText(S.alerts.rules[it.id])]);
       const seen = seenAt(it), isStale = num(it.price) > 0 && seen && now - seen > DAY;
       const deletable = !it.virtual && !u && !reg().catNames.has(norm(it.name));
       h += '<tr class="' + (open ? 'open' : '') + '"><td class="c-name"><button class="name-btn" data-act="price-open" data-id="' + id + '" aria-expanded="' + open + '">' + nameHTML(it.id) + '</button>' + tagList(tags) + '</td>' +
         '<td class="num"><input id="pi-price-' + id + '" class="cell-in num" inputmode="decimal" value="' + (it.price != null ? NF0.format(it.price) : '') + '" placeholder="—" data-chg="item" data-id="' + id + '" data-f="price" aria-label="Market price of ' + esc(it.name) + '"' + (it.bound ? ' disabled title="Bound items can’t be sold on the market"' : '') + '></td>' +
+        '<td class="num"><input id="pi-world-' + id + '" class="cell-in num" inputmode="decimal" value="' + (num(it.world) > 0 ? NF0.format(it.world) : '') + '" placeholder="—" data-chg="item" data-id="' + id + '" data-f="world" aria-label="World Market price of ' + esc(it.name) + '"' + (it.bound ? ' disabled title="Bound items can’t be sold on the market"' : '') + '>' + (num(it.world) > 0 ? priceAge(it.id, true) : '') + '</td>' +
         '<td>' + sparkHTML(it) + '</td>' +
         '<td class="num"><input id="pi-vendor-' + id + '" class="cell-in num" inputmode="decimal" value="' + (it.vendor != null ? NF0.format(it.vendor) : '') + '" placeholder="—" data-chg="item" data-id="' + id + '" data-f="vendor" aria-label="NPC price of ' + esc(it.name) + '"></td>' +
         '<td class="c"><input type="checkbox" class="check" id="pi-gather-' + id + '" data-chg="item" data-id="' + id + '" data-f="gather"' + (isGathered(it) ? ' checked' : '') + ' aria-label="I gather ' + esc(it.name) + '"></td>' +
@@ -1762,7 +1851,7 @@
         '<td class="num">' + u + '</td>' +
         '<td class="when"' + (seen !== (num(it.updatedAt) || null) ? ' title="Price set ' + esc(ago(it.updatedAt)) + ', still the same on the market ' + esc(ago(seen)) + '"' : '') + '>' + ago(seen) + (isStale ? ' <span class="tag warn">Old</span>' : '') + '</td>' +
         '<td class="c">' + (deletable && canManage() ? '<button class="btn small ghost" data-act="item-del" data-id="' + id + '">Delete</button>' : '') + '</td></tr>';
-      if (open) h += '<tr class="detail"><td colspan="9">' + priceDetail(it) + '</td></tr>';
+      if (open) h += '<tr class="detail"><td colspan="10">' + priceDetail(it) + '</td></tr>';
     }
     return h + '</tbody></table></div>' + moreBtn('price-more', shown.length, items.length);
   }
@@ -1770,7 +1859,7 @@
     const hist = histOf(it);
     const flag = '<label class="check"><input type="checkbox" id="pu-' + esc(it.id) + '" data-chg="item" data-id="' + esc(it.id) + '" data-f="unavailable"' + (it.unavailable ? ' checked' : '') + '> ' +
       esc(it.name) + ' isn’t in the Global client yet. Leave out every recipe that uses it.</label>';
-    if (!hist.length) return '<div class="ppanel">' + flag + alertForm(it) + '<p class="help">No prices recorded for ' + esc(it.name) + ' yet. Enter one above or paste a price list on the Import tab, and each new price is added here.</p></div>';
+    if (!hist.length) return '<div class="ppanel">' + flag + alertForm(it) + '<p class="help">No market prices recorded for ' + esc(it.name) + ' yet. Enter one above or paste a price list on the Import tab, and each new price is added here.</p>' + worldHistHTML(it) + '</div>';
     let lo = Infinity, hi = -Infinity, sum = 0;
     for (const x of hist) { lo = Math.min(lo, x.p); hi = Math.max(hi, x.p); sum += x.p; }
     const first = hist[0], last = hist[hist.length - 1];
@@ -1785,8 +1874,34 @@
         const c = prev ? (x.p - prev.p) / prev.p : null;
         return '<tr><td>' + esc(when(x.t)) + '</td><td class="num">' + k(x.p) + '</td><td class="num">' + (c == null ? '—' : (c >= 0 ? '+' : '−') + Math.abs(c * 100).toFixed(1) + '%') + '</td>' +
           '<td><button class="btn small ghost" data-act="hist-del" data-id="' + esc(it.id) + '" data-t="' + x.t + '" aria-label="Delete the reading from ' + esc(when(x.t)) + '">Delete</button></td></tr>';
-      }).join('') + '</tbody></table></div><p class="note">Delete a reading if a price was entered or pasted wrong. Prices entered within 10 minutes of each other count as one reading.</p></details></div>';
+      }).join('') + '</tbody></table></div><p class="note">Delete a reading if a price was entered or pasted wrong. Prices entered within 10 minutes of each other count as one reading.</p></details>' + worldHistHTML(it) + '</div>';
     return h;
+  }
+  // An item's World Market readings, in its price panel.
+  function worldHistHTML(it) {
+    const wh = wHistOf(it);
+    if (!wh.length) return '';
+    const wi = worldInfo(it);
+    return '<details class="hist"><summary>World Market: ' + (wi.latest > 0 ? k(wi.latest) + ' now, ' : 'no price now, ') + plural(wh.length, 'reading') + '</summary><div class="mini-well"><table class="mini"><thead><tr><th>When</th><th class="num">Price</th><th class="num">Change</th><th><span class="sr">Delete</span></th></tr></thead><tbody>' +
+      wh.map((x, i) => ({ x: x, i: i })).reverse().map(({ x, i }) => {
+        const prev = wh[i - 1];
+        const c = prev ? (x.p - prev.p) / prev.p : null;
+        return '<tr><td>' + esc(when(x.t)) + '</td><td class="num">' + k(x.p) + '</td><td class="num">' + (c == null ? '—' : (c >= 0 ? '+' : '−') + Math.abs(c * 100).toFixed(1) + '%') + '</td>' +
+          '<td><button class="btn small ghost" data-act="hist-del" data-w="1" data-id="' + esc(it.id) + '" data-t="' + x.t + '" aria-label="Delete the World Market reading from ' + esc(when(x.t)) + '">Delete</button></td></tr>';
+      }).join('') + '</tbody></table></div><p class="note">World Market prices are entered or pasted by hand for now. Delete a reading that was entered wrong.</p></details>';
+  }
+  // How much more an item must list for on the World Market to leave more after its higher fee, in percent.
+  function worldEdge() {
+    const here = 1 - saleFees() / 100, there = 1 - saleFees(true) / 100;
+    return there > 0 ? Math.max(0, Math.round((here / there - 1) * 100)) : 0;
+  }
+  // A tag for an item that's cheaper to buy, or better to sell, on the World Market.
+  function worldBetter(it) {
+    if (!it || it.bound) return '';
+    const p = priceInfo(it).use, w = worldInfo(it).use;
+    if (!(p > 0) || !(w > 0)) return '';
+    if (w < p) return 'Cheaper on the World Market';
+    return w * (1 - saleFees(true) / 100) > p * (1 - saleFees() / 100) ? 'Sells better on the World Market' : '';
   }
 
   function niceTicks(min, max, n) {
@@ -2006,6 +2121,8 @@
   function pasteHTML() {
     const st = UI.shots;
     let h = '<p class="help">Copy a price list from any website, spreadsheet or chat message and paste it below. On aion2.exchange, select the table from the Item header down to the last row, then copy. Each item name is matched to your item list and the first price after it is used, skipping the 9-digit item ID. That ID is remembered on save, so the item can be refreshed from aion2.exchange later. Items that aren’t on your list are ignored. If an item appears more than once, its lowest price is kept. Nothing is saved until you check the list and click Save.</p>' +
+      '<div class="row-gap"><span class="help">These prices are from</span><div class="seg" role="group" aria-label="Which market the prices are from">' +
+      [['server', 'Server Market'], ['world', 'World Market']].map(([v, l]) => '<button data-act="paste-mkt" data-v="' + v + '" aria-pressed="' + ((v === 'world') === !!st.world) + '">' + l + '</button>').join('') + '</div></div>' +
       '<div class="field"><label for="paste-in">Pasted prices</label><textarea id="paste-in" class="in" rows="8" data-inp="paste-text" placeholder="Odyle	1,520&#10;Fine Odyle	4,800&#10;Orichalcum Ore	2.1k">' + esc(st.pasteText || '') + '</textarea></div>' +
       '<div class="row-gap"><button class="btn primary" data-act="paste-read">Read prices</button>' + (st.pasteText ? '<button class="btn ghost" data-act="paste-clear">Clear</button>' : '') + '</div>';
     if (st.pasteNote) h += '<p class="help" role="status">' + esc(st.pasteNote) + '</p>';
@@ -2092,8 +2209,9 @@
   function marketReview() {
     const rows = UI.shots.market;
     const n = rows.filter(r => r.include).length;
-    let h = '<section class="panel"><div class="toolbar"><h3 class="sec-h">' + 'Check the prices found' + '</h3><div class="row-gap"><button class="btn ghost" data-act="shot-discard">Discard</button>' +
-      '<button class="btn primary" data-act="shot-apply"' + (n ? '' : ' disabled') + '>Save ' + plural(n, 'price') + '</button></div></div>' +
+    const world = !!UI.shots.world;
+    let h = '<section class="panel"><div class="toolbar"><h3 class="sec-h">' + (world ? 'Check the World Market prices found' : 'Check the prices found') + '</h3><div class="row-gap"><button class="btn ghost" data-act="shot-discard">Discard</button>' +
+      '<button class="btn primary" data-act="shot-apply"' + (n ? '' : ' disabled') + '>Save ' + plural(n, world ? 'World Market price' : 'price') + '</button></div></div>' +
       '<p class="help">Fix any name that matched the wrong item, untick rows you don’t want, then save.</p>' +
       '<div class="well"><table class="grid prices" style="min-width:640px"><thead><tr><th class="c">Save</th><th>Item</th><th>Change</th><th class="num w-num">Price per unit</th></tr></thead><tbody>';
     rows.forEach((r, i) => {
@@ -2101,7 +2219,7 @@
       const p = num(r.priceText);
       let change = '<span class="tag ex">New item</span>';
       if (match) {
-        const old = num(match.price);
+        const old = num(world ? match.world : match.price);
         const d = old > 0 && p > 0 ? (p - old) / old : null;
         change = old > 0 ? '<span class="muted">' + k(old) + ' → ' + k(p) + '</span>' + (d != null ? ' <span>' + (d >= 0 ? '▲ ' : '▼ ') + Math.abs(Math.round(d * 100)) + '%</span>' : '') : '<span class="tag">First price</span>';
       }
@@ -3193,6 +3311,7 @@
     const s = S.settings, lock = canManage() ? '' : ' disabled';
     let h = '<section class="panel"><h2 class="sec-h">Market and recipes</h2><div class="fgrid">' +
       '<div class="field"><label for="set-tax">Sales fee %</label><input id="set-tax" class="in num" inputmode="decimal" value="' + esc(s.tax) + '" data-chg="set" data-k="tax"' + lock + '><span class="help">Taken from the Kina you get when an item sells. Guides report 10%. The Market screen shows the current rate.</span></div>' +
+      '<div class="field"><label for="set-wtax">World Market sales fee %</label><input id="set-wtax" class="in num" inputmode="decimal" value="' + esc(s.worldTax) + '" data-chg="set" data-k="worldTax"' + lock + '><span class="help">The World Market trades with every server of your faction and region. NC announced a 20% sales fee there, taken the same way. The listing fee applies on both markets.</span></div>' +
       '<div class="field"><label for="set-list">Listing fee %</label><input id="set-list" class="in num" inputmode="decimal" value="' + esc(s.listFee) + '" data-chg="set" data-k="listFee"' + lock + '><span class="help">Paid when you list an item, as a share of its price, and not refunded if you cancel or relist. Guides report about 2%, and some say it’s paid in Bound Kina. Set it to 0 if you don’t want to count it.</span></div>' +
       '<div class="field"><label for="set-loss">Materials lost on a failed craft %</label><input id="set-loss" class="in num" inputmode="decimal" value="' + esc(s.failLoss) + '" data-chg="set" data-k="failLoss"' + lock + '><span class="help">Guides say a failed craft uses up the materials. Lower this if your client returns some.</span></div>' +
       '</div>' +
@@ -3556,6 +3675,13 @@
         const newer = x.price != null && ((x.updatedAt || 0) > (ex.updatedAt || 0) || ex.price == null);
         const next = Object.assign({}, ex, { price: newer ? x.price : ex.price, updatedAt: newer ? x.updatedAt : ex.updatedAt, vendor: ex.vendor != null ? ex.vendor : x.vendor, gather: ex.gather || x.gather, bound: ex.bound || x.bound, unavailable: !!(ex.unavailable || x.unavailable), hist: hist.slice(-HIST_MAX) });
         if (!next.marketKey && x.marketKey) next.marketKey = x.marketKey;
+        if (wHistOf(x).length) {
+          const seenW = new Set(), wh = [];
+          for (const p of wHistOf(ex).concat(wHistOf(x))) if (!seenW.has(p.t)) { seenW.add(p.t); wh.push(p); }
+          wh.sort((a, b) => a.t - b.t);
+          const newerW = num(x.world) > 0 && ((x.worldAt || 0) > (ex.worldAt || 0) || !(num(ex.world) > 0));
+          Object.assign(next, { world: newerW ? x.world : (num(ex.world) > 0 ? ex.world : null), worldAt: newerW ? x.worldAt : (ex.worldAt || null), wHist: wh.slice(-HIST_MAX) });
+        }
         delete next.virtual;
         Store.putItem(next);
       } else {
@@ -3597,7 +3723,7 @@
     const hadCrafts = myCrafts(), crafts = readCrafts(d.myCrafts).filter(c => getRecipe(c.r) && !hadCrafts.some(x => x.r === c.r && x.t === c.t));
     if (crafts.length) setCrafts(hadCrafts.concat(crafts));
     if (num(d.myCraftMin) > 0) setCraftMin(num(d.myCraftMin));
-    return 'Imported' + plural(ni, 'new item') + ' and ' + plural(nr, 'recipe') + '.';
+    return 'Imported ' + plural(ni, 'new item') + ' and ' + plural(nr, 'recipe') + '.';
   }
 
   const ACTIONS = {
@@ -3756,10 +3882,10 @@
     'price-open': t => { UI.priceOpen = UI.priceOpen === t.dataset.id ? null : t.dataset.id; render(); },
     'hist-del': t => {
       const it = getItem(t.dataset.id); if (!it) return;
-      const ts = +t.dataset.t;
-      const hist = histOf(it).filter(p => p.t !== ts);
+      const ts = +t.dataset.t, world = t.dataset.w === '1';
+      const hist = (world ? wHistOf(it) : histOf(it)).filter(p => p.t !== ts);
       const last = hist[hist.length - 1];
-      const next = Object.assign({}, it, { hist: hist, price: last ? last.p : null, updatedAt: last ? last.t : null });
+      const next = Object.assign({}, it, world ? { wHist: hist, world: last ? last.p : null, worldAt: last ? last.t : null } : { hist: hist, price: last ? last.p : null, updatedAt: last ? last.t : null });
       delete next.virtual;
       Store.putItem(next); toast('Deleted that reading.'); render();
     },
@@ -3779,7 +3905,7 @@
       st.source = 'paste';
       const C = buildCalc();
       st.market = res.rows.map(r => {
-        const doubt = newPriceDoubt(findItem(r.name), r.price, C);
+        const doubt = newPriceDoubt(findItem(r.name), r.price, C, st.world);
         return { read: null, name: r.name, include: !doubt, priceText: NF0.format(r.price), doubt: doubt, key: r.key, keyFor: r.name };
       });
       const doubtful = st.market.filter(r => r.doubt).length, keys = res.rows.filter(r => r.key && (findItem(r.name) || {}).marketKey !== r.key).length;
@@ -3791,6 +3917,12 @@
         : 'None of the item names on your list were found in that text.' + (res.unknown.length
           ? ' It has names like ' + res.unknown.map(n => '“' + n + '”').join(', ') + '. If those are in another language, switch aion2.exchange (and any translate extension) to English. If they’re items no recipe uses, like drop-only gear or skins, there’s nothing to update.'
           : ' Copy the table including the item names, then paste again.');
+      render();
+    },
+    'paste-mkt': t => {
+      const st = UI.shots;
+      st.world = t.dataset.v === 'world';
+      if (st.market) { const C = buildCalc(); for (const r of st.market) r.doubt = newPriceDoubt(findItem(r.name), num(r.priceText), C, st.world); }
       render();
     },
     'paste-clear': () => { UI.shots.pasteText = ''; UI.shots.pasteNote = ''; if (UI.shots.source === 'paste') UI.shots.market = null; render(); },
@@ -3847,13 +3979,15 @@
       const it = getItem(t.dataset.id); if (!it) return;
       const f = t.dataset.f;
       let next;
-      if (f === 'price' || f === 'vendor') {
-        const raw = t.value.trim(), v = raw === '' ? null : num(raw);
+      if (f === 'price' || f === 'vendor' || f === 'world') {
+        const raw = t.value.trim();
+        let v = raw === '' ? null : num(raw);
         if (raw !== '' && (v == null || v < 0)) { toast('Enter a price like 1520, 1,520 or 1.5k.'); t.value = it[f] != null ? NF0.format(it[f]) : ''; return; }
-        if (v === it[f]) { t.value = v != null ? NF0.format(v) : ''; return; }
-        const doubt = f === 'price' ? newPriceDoubt(it, v, buildCalc()) : null;
+        if (f === 'world' && v === 0) v = null;
+        if (v === (it[f] == null ? null : it[f])) { t.value = v != null ? NF0.format(v) : ''; return; }
+        const doubt = f === 'price' || f === 'world' ? newPriceDoubt(it, v, buildCalc(), f === 'world') : null;
         if (doubt) toast('Saved, but it’s ' + doubt + '. The rankings keep using the usual price until more readings agree.');
-        next = f === 'price' ? withPrice(it, v) : Object.assign({}, it, { vendor: v, example: false });
+        next = f === 'price' ? withPrice(it, v) : f === 'world' ? withWorld(it, v) : Object.assign({}, it, { vendor: v, example: false });
       } else if (f === 'gather') { setGather([it.id], t.checked); later(); return; }
       else if (f === 'bound' || f === 'unavailable') next = Object.assign({}, it, { [f]: t.checked, example: false });
       if (!next) return;
@@ -3928,12 +4062,12 @@
     'ed-check': t => { UI.editor[t.dataset.k] = t.checked; },
     'ni-gather': t => { UI.newItem.gather = t.checked; },
     'sm-inc': t => { UI.shots.market[+t.dataset.i].include = t.checked; later(); },
-    'sm-name': t => { const r = UI.shots.market[+t.dataset.i]; r.name = t.value.trim(); r.doubt = newPriceDoubt(findItem(r.name), num(r.priceText), buildCalc()); later(); },
+    'sm-name': t => { const r = UI.shots.market[+t.dataset.i]; r.name = t.value.trim(); r.doubt = newPriceDoubt(findItem(r.name), num(r.priceText), buildCalc(), UI.shots.world); later(); },
     'sm-price': t => {
       const r = UI.shots.market[+t.dataset.i], v = num(t.value);
       r.priceText = v != null ? NF0.format(v) : t.value.trim();
       if (!(v > 0)) r.include = false;
-      r.doubt = newPriceDoubt(findItem(r.name), v, buildCalc());
+      r.doubt = newPriceDoubt(findItem(r.name), v, buildCalc(), UI.shots.world);
       later();
     }
   };
@@ -3984,7 +4118,7 @@
   function applyMarket() {
     const rows = UI.shots.market || [];
     let upd = 0, add = 0;
-    const ts = Date.now();
+    const ts = Date.now(), world = !!UI.shots.world, priced = (it, p) => world ? withWorld(it, p, ts) : withPrice(it, p, ts);
     for (const r of rows) {
       if (!r.include) continue;
       const p = num(r.priceText), name = r.name.trim();
@@ -3992,15 +4126,15 @@
       // A key read next to the name goes with it, unless the row was renamed to another item.
       const key = r.key && norm(r.keyFor) === norm(name) ? r.key : null;
       const it = findItem(name);
-      if (it) { Store.putItem(Object.assign(withPrice(it, p, ts), key ? { marketKey: key } : {})); upd++; }
+      if (it) { Store.putItem(Object.assign(priced(it, p), key ? { marketKey: key } : {})); upd++; }
       else {
         const id = S.items.has(slugId(name)) ? uid('i') : slugId(name);
-        Store.putItem(withPrice(Object.assign({ id: id, name: name, price: null, vendor: null, gather: false, bound: /\(bound\)/i.test(name), updatedAt: null, hist: [] }, key ? { marketKey: key } : {}), p, ts));
+        Store.putItem(priced(Object.assign({ id: id, name: name, price: null, vendor: null, gather: false, bound: /\(bound\)/i.test(name), updatedAt: null, hist: [] }, key ? { marketKey: key } : {}), p));
         add++;
       }
     }
     UI.shots.market = null; UI.shots.status = 'idle';
-    toast('Saved ' + plural(upd, 'price') + (add ? ' and added ' + plural(add, 'new item') : '') + '.');
+    toast('Saved ' + plural(upd, world ? 'World Market price' : 'price') + (add ? ' and added ' + plural(add, 'new item') : '') + '.');
     render();
   }
 

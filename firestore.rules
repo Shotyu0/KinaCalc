@@ -33,12 +33,15 @@ service cloud.firestore {
     }
     // A price entry: only the fields the page writes, with sane types and sizes.
     function validItem(d) {
-      return d.keys().hasOnly(['name', 'price', 'vendor', 'gather', 'bound', 'unavailable', 'updatedAt', 'hist', 'example', 'marketKey'])
+      return d.keys().hasOnly(['name', 'price', 'vendor', 'gather', 'bound', 'unavailable', 'updatedAt', 'hist', 'example', 'marketKey', 'world', 'worldAt', 'wHist'])
         && (!('marketKey' in d) || (d.marketKey is string && d.marketKey.matches('[0-9]{9}')))
         && d.name is string && d.name.size() > 0 && d.name.size() <= 120
         && optNumber(d, 'price') && optNumber(d, 'vendor') && optTime(d, 'updatedAt')
         && optBool(d, 'gather') && optBool(d, 'bound') && optBool(d, 'unavailable') && optBool(d, 'example')
-        && (!('hist' in d) || (d.hist is list && d.hist.size() <= 200));
+        && (!('hist' in d) || (d.hist is list && d.hist.size() <= 200))
+        // The World Market price and its history, kept beside the server's.
+        && optNumber(d, 'world') && optTime(d, 'worldAt')
+        && (!('wHist' in d) || (d.wHist is list && d.wHist.size() <= 200));
     }
 
     // The member list. Each person may check their own entry; only the console can change it.
