@@ -70,7 +70,7 @@
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
   let GATHERABLE = null; // names of materials gathered from nodes, from data/gather-icons.json
-  const BUILD = '2026-11-28a'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-11-28b'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -148,7 +148,7 @@
     }
     return s;
   }
-  const UI_KEYS = { tab: 's', goal: 's', metric: 's', per: 's', prof: 's', crafts: 's', wanted: 's', planGather: 'b', priceSort: 's', priceFilter: 's', rankAll: 'b', canCraft: 'b', recProf: 's', recSrc: 's', budget: 's', affordOnly: 'b', gatherShow: 's', gatherOdds: 's', gatherNoBreaks: 'b', ckChar: 's', alertSeen: 's' };
+  const UI_KEYS = { tab: 's', goal: 's', metric: 's', per: 's', prof: 's', crafts: 's', wanted: 's', planGather: 'b', priceSort: 's', priceFilter: 's', rankAll: 'b', canCraft: 'b', recProf: 's', recSrc: 's', budget: 's', affordOnly: 'b', skipSitting: 'b', gatherShow: 's', gatherOdds: 's', gatherNoBreaks: 'b', ckChar: 's', alertSeen: 's' };
   function readUI() {
     try {
       const x = JSON.parse(localStorage.getItem(LS_UI) || '{}') || {};
@@ -468,7 +468,7 @@
     tab: 'rank', goal: 'normal', metric: 'buy', per: 'kina', prof: 'all', open: null, crafts: '1', wanted: '1', planGather: true,
     priceQuery: '', priceSort: 'name', priceFilter: 'all', priceShow: 100, priceOpen: null,
     rankQ: '', rankAll: false, canCraft: false, rankShow: PAGE,
-    recQ: '', recProf: 'all', recSrc: 'all', recShow: PAGE, budget: '', affordOnly: false,
+    recQ: '', recProf: 'all', recSrc: 'all', recShow: PAGE, budget: '', affordOnly: false, skipSitting: false,
     gatherShow: '', gatherQ: '', gOpen: null, runDraft: null, gatherOdds: 'exp', gatherNoBreaks: false
   }, readUI());
   UI.editor = null; UI.editorErr = []; UI.editorFrom = 'recipes';
@@ -683,18 +683,25 @@
   }
   // How an item is selling on one market, from the relay's listing counts. A listing that disappears was
   // bought, taken down or expired: there's no telling which. Selling: its listings fell by a quarter or
-  // more in a day. Sitting: nothing about its market (lowest price or count) has changed in 3 days.
-  // Null when the counts are missing or older than 3 hours.
+  // more in a day. Sitting: its lowest price has held for 3 days and its listings aren't going down, so
+  // nobody is buying at that price, even if new listings keep matching it. Null when the counts are
+  // missing or older than 3 hours.
   const SITTING_DAYS = 3;
   function sellInfo(it, world) {
     const m = S.market, read = m && (world ? m.wAt : m.nAt);
     if (!it || it.bound || !it.marketKey || !read || Date.now() - read > 3 * 36e5) return null;
     const n = num(world ? it.wListings : it.listings);
     if (n == null) return null;
-    const n24 = world ? null : num(it.listings24h), since = num(world ? it.wSameSince : it.sameSince);
-    const still = n > 0 && since ? Date.now() - since : 0;
-    const state = n24 >= 3 && n24 - n >= 2 && (n24 - n) / n24 >= 0.25 ? 'selling' : still >= SITTING_DAYS * DAY ? 'sitting' : '';
-    return { n: n, n24: n24, since: since, still: still, state: state };
+    const n24 = world ? null : num(it.listings24h);
+    // Since when the lowest price has held: when it last changed in our history, or QuestLog's time when
+    // that's earlier (it moves whenever the price or the count changes, so the price has held at least
+    // that long, from before the relay began recording it).
+    const changed = num(world ? it.worldAt : it.updatedAt), still = num(world ? it.wSameSince : it.sameSince);
+    const since = changed && still ? Math.min(changed, still) : changed || still || null;
+    const held = n > 0 && since ? Date.now() - since : 0;
+    const state = n24 >= 3 && n24 - n >= 2 && (n24 - n) / n24 >= 0.25 ? 'selling'
+      : held >= SITTING_DAYS * DAY && !(n24 != null && n < n24) ? 'sitting' : '';
+    return { n: n, n24: n24, since: since, held: held, state: state, price: num(world ? it.world : it.price) };
   }
   function sellTxt(s) {
     if (!s) return '';
@@ -704,19 +711,19 @@
   function sellWhy(s, name) {
     if (!s || !s.state) return '';
     return s.state === 'selling' ? 'Listings fell from ' + NF0.format(s.n24) + ' to ' + NF0.format(s.n) + ' in a day, so ' + name + ' is being bought (some may have been taken down).'
-      : 'Its lowest price and listing count haven’t changed in ' + plural(Math.floor(s.still / DAY), 'day') + ': nobody has bought one or listed a new one, so ' + name + ' may sit a while before it sells.';
+      : 'Its lowest price has stayed at ' + k(s.price) + ' for ' + plural(Math.floor(s.held / DAY), 'day') + ' and its listings aren’t going down, so nobody is buying at that price. ' + name + ' may sit until its listing runs out.';
   }
   // A tag for an item that's selling or sitting, or null.
   function sellTag(it, world) {
     const s = sellInfo(it, world);
     if (!s || !s.state) return null;
-    return s.state === 'selling' ? ['gather', world ? 'Selling on the World Market' : 'Selling'] : ['warn', 'Sitting ' + Math.floor(s.still / DAY) + ' days' + (world ? ' on the World Market' : '')];
+    return s.state === 'selling' ? ['gather', world ? 'Selling on the World Market' : 'Selling'] : ['warn', 'Sitting ' + Math.floor(s.held / DAY) + ' days' + (world ? ' on the World Market' : '')];
   }
   // The listing count under a price on the Prices tab.
   function listSub(it, world) {
     const s = sellInfo(it, world);
     if (!s) return '';
-    const title = (world ? 'On the World Market' : 'On the market') + (s.n && s.since ? ': lowest price and count unchanged since ' + when(s.since) : '');
+    const title = (world ? 'On the World Market' : 'On the market') + (s.n && s.since ? ': lowest price unchanged since ' + when(s.since) : '');
     return '<div class="sub" title="' + esc(title) + '">' + (s.n ? NF0.format(s.n) + ' listed' + (s.n24 != null && s.n24 !== s.n ? ', ' + NF0.format(s.n24) + ' a day ago' : '') : 'none listed') + '</div>';
   }
   // The listing count in a breakdown, with a note when the item is selling or sitting.
@@ -1272,7 +1279,7 @@
     if (pd.ignored.length) f.push(['warn', 'Ignoring a doubtful price']);
     if (out && out.bound) f.push(['', 'Ingredient only']);
     else if (b.outNet == null) f.push(['warn', 'Needs sell price']);
-    else { const st = sellTag(out, !!(rcOf(row[UI.metric]) || {}).outWorld); if (st) f.push(st); }
+    else { const st = sellTag(out, !!(row[UI.metric] || {}).outWorld); if (st) f.push(st); }
     if (b.comboMissing) f.push(['warn', 'Needs combo item price']);
     if (g.missing.length) f.push(['warn', plural(g.missing.length, 'material price') + ' missing']);
     else if (b.missing.length) f.push(['', 'Gathered mats need prices for buy-all']);
@@ -1311,11 +1318,16 @@
     if (UI.prof !== 'all' && profs.indexOf(UI.prof) < 0) UI.prof = 'all';
     const variants = variantLabels(pool);
     const q = loose(UI.rankQ);
+    // A row whose result is sitting on the market it would be sold on.
+    const counts = !!(S.market && S.market.nAt);
+    const sits = x => { const s = sellInfo(getItem(x.r.output), !!(x[UI.metric] || {}).outWorld); return !!s && s.state === 'sitting'; };
     let rows = pool.filter(x =>
       (UI.prof === 'all' || x.r.profession === UI.prof) &&
       (!q || loose(itemName(x.r.output)).indexOf(q) >= 0) &&
       (!UI.canCraft || canCraft(x.r)) &&
       (!UI.affordOnly || !B || affordable(x)));
+    const sitting = counts ? rows.filter(sits).length : 0;
+    if (counts && UI.skipSitting) rows = rows.filter(x => !sits(x));
     const rankable = rows.filter(x => sortKey(x) > -Infinity && !priceDoubts(x).overCost);
     const hidden = rows.length - rankable.length;
     if (!UI.rankAll) rows = rankable;
@@ -1345,6 +1357,7 @@
       '<div class="field budget"><label for="budget">My budget (Kina)</label><input id="budget" class="in num" inputmode="decimal" value="' + esc(UI.budget) + '" data-chg="budget" placeholder="e.g. 10m" autocomplete="off"></div>' +
       '<label class="check"><input type="checkbox" id="rk-craft" data-chg="rk-craft"' + (UI.canCraft ? ' checked' : '') + '> Only what my levels can craft</label>' +
       '<label class="check"><input type="checkbox" id="rk-afford" data-chg="rk-afford"' + (UI.affordOnly ? ' checked' : '') + (B ? '' : ' disabled') + '> Only what my budget covers</label>' +
+      (counts ? '<label class="check" title="Its lowest price has held for ' + SITTING_DAYS + ' days while its listings aren’t going down"><input type="checkbox" id="rk-sitting" data-chg="rk-sitting"' + (UI.skipSitting ? ' checked' : '') + '> Skip what isn’t selling' + (sitting ? ' <span class="muted">(' + NF0.format(sitting) + ')</span>' : '') + '</label>' : '') +
       '<label class="check"><input type="checkbox" id="rk-all" data-chg="rk-all"' + (UI.rankAll ? ' checked' : '') + '> Include recipes with missing or doubtful prices' + (hidden ? ' <span class="muted">(' + NF0.format(hidden) + ')</span>' : '') + '</label></div>';
     if (profs.length > 1) {
       h += '<div class="chips" role="group" aria-label="Profession">' +
@@ -1866,7 +1879,7 @@
       '<p class="help">The <strong>World price</strong> is the item’s lowest price on the World Market, which trades with every server of your faction and region. Where an item has both, the math buys from whichever is cheaper and sells on whichever leaves more after fees: the World Market’s sales fee is ' + k(S.settings.worldTax) + '%, so selling there only pays when it lists for about ' + worldEdge() + '% more. ' +
       (worldFed() ? 'World prices refresh themselves every hour from QuestLog (' + esc(S.market.wName) + ') for each item whose market key is known; for any other item, enter or paste one when you check.</p>'
         : 'World prices don’t refresh themselves yet, so enter or paste them when you check.</p>') +
-      (S.market && S.market.nAt ? '<p class="help">Under each price is how many listings the item has, and had a day earlier. <strong>Selling</strong> means a quarter or more of its listings went in a day, so people are buying it (some may have been taken down: there’s no telling which). <strong>Sitting</strong> means its lowest price and listing count haven’t changed in ' + SITTING_DAYS + ' days or more, so nobody is buying. Sort by <strong>Selling fastest</strong> to see what moves.</p>' : '');
+      (S.market && S.market.nAt ? '<p class="help">Under each price is how many listings the item has, and had a day earlier. <strong>Selling</strong> means a quarter or more of its listings went in a day, so people are buying it (some may have been taken down: there’s no telling which). <strong>Sitting</strong> means its lowest price has held for ' + SITTING_DAYS + ' days or more while its listings aren’t going down, so nobody is buying at that price. Sort by <strong>Selling fastest</strong> to see what moves.</p>' : '');
     h += alertsPanel();
     markHitsSeen();
     h += '<section class="panel"><div class="addrow">' +
@@ -4076,6 +4089,7 @@
     'plan-g': t => { UI.planGather = t.checked; saveUI(); later(); },
     'rk-craft': t => { UI.canCraft = t.checked; UI.rankShow = PAGE; saveUI(); later(); },
     'rk-afford': t => { UI.affordOnly = t.checked; UI.rankShow = PAGE; saveUI(); later(); },
+    'rk-sitting': t => { UI.skipSitting = t.checked; UI.rankShow = PAGE; saveUI(); later(); },
     budget: t => {
       const raw = t.value.trim(), v = num(raw);
       if (raw && !(v > 0)) toast('Enter a budget like 10m, 500k or 10,000,000.');
