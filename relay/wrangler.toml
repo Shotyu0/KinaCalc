@@ -1,4 +1,5 @@
-# Cloudflare Worker that checks aion2.exchange's prices every hour and sends price alerts (see worker.js).
+# Cloudflare Worker that checks market prices every hour (aion2.exchange and QuestLog) and sends price
+# alerts (see worker.js).
 # Deploy from this folder:
 #   npx wrangler login
 #   npx wrangler kv namespace create PRICES     (say yes when it offers to add it to this file)
@@ -10,14 +11,20 @@ name = "kina-relay"
 main = "worker.js"
 compatibility_date = "2025-10-01"
 
-# Twenty past each hour, after aion2.exchange's hourly reading.
+# Twenty past each hour, after QuestLog's and aion2.exchange's hourly readings (at about :04 and :07).
 [triggers]
 crons = ["20 * * * *"]
 
 # The server whose market is read: its id on aion2.exchange (from aion2.exchange/api/servers).
+# QUESTLOG_SERVER is the same server on QuestLog, and QUESTLOG_WORLD the World Market it trades on: the
+# one for its region and faction (QuestLog's auctionHouse.getServers lists them; 61 is NA East, Elyos).
+# Leave the QuestLog ones out to read aion2.exchange only.
 [vars]
 MARKET_SERVER = "11101"
 MARKET_SERVER_NAME = "Siel"
+QUESTLOG_SERVER = "1101"
+QUESTLOG_WORLD = "61"
+QUESTLOG_WORLD_NAME = "NA East World Market"
 
 [[kv_namespaces]]
 binding = "PRICES"

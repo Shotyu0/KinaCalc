@@ -1,19 +1,23 @@
-// Kina Ledger's relay to aion2.exchange, a Cloudflare Worker.
+// Kina Ledger's relay to the market price sites, a Cloudflare Worker.
 //
-// Every hour it reads the market price of each item in the shared price book that has an aion2.exchange
-// key, saves the prices that changed (the page labels any that look off), notes when it checked, and
-// sends members the price alerts they set. A member can also ask for a check now (at most every 10
+// Every hour it reads the prices of each item in the shared price book that has a market key (the
+// game's 9-digit item number): the server's lowest price from aion2.exchange, or from QuestLog when
+// aion2.exchange can't answer, and from QuestLog the World Market's lowest price and how many listings
+// each item has. It saves what changed (the page labels prices that look off), notes when it checked,
+// and sends members the price alerts they set. A member can also ask for a check now (at most every 10
 // minutes) and send a test message to their Discord webhook.
 //
 // It writes to Firestore with the project's service account key, kept as the FIREBASE_SA secret.
-// aion2.exchange's owner agreed to this use; the page credits the site.
+// aion2.exchange's owner agreed to this use, and QuestLog allows private, free use of its data; the
+// page credits both.
 const UPSTREAM = 'https://aion2.exchange/api/';
+const QUESTLOG = 'https://questlog.gg/aion-2/api/trpc/auctionHouse.getListings?input=';
 const UA = 'KinaLedger/1.0 (personal crafting calculator; https://github.com/Shotyu0/KinaCalc)';
 const PROJECT = 'kina-ledger';
 const DOCS = 'projects/' + PROJECT + '/databases/(default)/documents/';
 const FS = 'https://firestore.googleapis.com/v1/' + DOCS.slice(0, -1);
 const ORIGINS = /^(https:\/\/shotyu0\.github\.io|http:\/\/(localhost|127\.0\.0\.1)(:\d+)?)$/;
-const KEY = /^\d{9}$/, SERVER = /^[A-Za-z0-9_-]{1,40}$/;
+const KEY = /^\d{9}$/, SERVER = /^[A-Za-z0-9_-]{1,40}$/, QL_MARKET = /^\d{1,6}$/;
 const WEBHOOK = /^https:\/\/((canary|ptb)\.)?discord(app)?\.com\/api\/webhooks\/\d{5,30}\/[A-Za-z0-9_-]{20,100}$/;
 const BATCH = 25;          // items asked at a time (aion2.exchange allows 50, but big asks can time out there)
 const SMALLEST = 5;        // a group this small that still fails means aion2.exchange is down
@@ -22,7 +26,7 @@ const KEEP = 1800;         // seconds an answer is kept for members asking close
 const AGAIN = 10 * 60e3;   // a member's check runs at most this often
 const HITS = 30;           // fired alerts kept per member
 const JUMP = 5;            // a price this many times off its usual one is labelled, as on the page
-const WAIT = 20e3;         // how long to wait for aion2.exchange's answer
+const WAIT = 20e3;         // how long to wait for a site's answer
 
 // Without the PRICES store, answers are kept in this copy of the Worker only.
 const memo = new Map(), members = new Map();
@@ -70,42 +74,79 @@ export default {
 async function run(env, ctx, why) {
   const server = String(env.MARKET_SERVER || ''), serverName = String(env.MARKET_SERVER_NAME || server);
   if (!SERVER.test(server)) throw new Error('MARKET_SERVER isn’t set in wrangler.toml.');
-  const token = await googleToken(env), now = Date.now();
-  const items = await fsList(token, 'items', ['name', 'price', 'updatedAt', 'marketKey', 'unavailable']);
+  const qlServer = String(env.QUESTLOG_SERVER || ''), qlWorld = String(env.QUESTLOG_WORLD || '');
+  const token = await googleToken(env), now = Date.now(), fresh = why === 'hourly';
+  const items = await fsList(token, 'items', ['name', 'price', 'updatedAt', 'marketKey', 'unavailable', 'world', 'worldAt', 'listings', 'listings24h', 'sameSince', 'wListings', 'wSameSince']);
   const keyed = items.filter(it => typeof it.marketKey === 'string' && KEY.test(it.marketKey) && !it.unavailable);
   const keys = [...new Set(keyed.map(it => it.marketKey))].sort();
-  const seen = new Map(), plan = { size: BATCH, left: ASKS };
-  try {
-    for (let i = 0; i < keys.length;) {
-      const part = keys.slice(i, i + plan.size);
-      for (const d of await askGroup(env, ctx, server, part, why === 'hourly', plan)) {
-        for (const x of d && Array.isArray(d.items) ? d.items : []) {
-          const k = String(x && x.item_key), p = Number(x && x.price);
-          if (KEY.test(k) && x.listed !== false && p > 0 && isFinite(p)) seen.set(k, p);
-        }
-      }
-      i += part.length;
+
+  // QuestLog's whole lists for the server and for the World Market, one request each. Either can fail
+  // without stopping the check: it then holds the Error.
+  const fromQuestlog = id => !QL_MARKET.test(id) ? Promise.resolve(null)
+    : askQuestlog(env, ctx, id, fresh).catch(e => { console.error('QuestLog couldn’t answer for market ' + id + ': ' + e.message); return e instanceof Error ? e : new Error(String(e)); });
+  const [ql, qlw] = await Promise.all([fromQuestlog(qlServer), fromQuestlog(qlWorld)]);
+  const here = ql instanceof Map ? ql : null, world = qlw instanceof Map ? qlw : null;
+
+  // The server's prices: aion2.exchange's, or QuestLog's when aion2.exchange can't answer.
+  let seen, source = 'aion2.exchange', fellBack;
+  try { seen = await exchangePrices(env, ctx, server, keys, fresh); }
+  catch (e) {
+    if (!e.market || !here) {
+      // Nothing is saved from a check that didn't get every price. The page shows why it failed.
+      if (e.market && ql instanceof Error) e.message += ' QuestLog didn’t answer either: ' + ql.message;
+      if (e.market) await gfetch(token, FS + ':commit', { method: 'POST', body: JSON.stringify({ writes: [{
+        update: { name: DOCS + 'market/status', fields: fields({ failedAt: Date.now(), failed: e.message }) },
+        updateMask: { fieldPaths: ['failedAt', 'failed'] } }] }) }).catch(() => {});
+      throw e;
     }
-  } catch (e) {
-    // Nothing is saved from a check that didn't get every price. The page shows why it failed.
-    if (e.market) await gfetch(token, FS + ':commit', { method: 'POST', body: JSON.stringify({ writes: [{
-      update: { name: DOCS + 'market/status', fields: fields({ failedAt: Date.now(), failed: e.message }) },
-      updateMask: { fieldPaths: ['failedAt', 'failed'] } }] }) }).catch(() => {});
-    throw e;
+    console.warn(e.message + ' Using QuestLog’s prices instead.');
+    source = 'QuestLog'; fellBack = e.message; seen = here;
   }
-  const changed = keyed.filter(it => seen.has(it.marketKey) && seen.get(it.marketKey) !== it.price)
-    .map(it => ({ id: it.id, path: it.path, name: String(it.name || it.id), old: it.price > 0 ? it.price : null, at: it.updatedAt, p: seen.get(it.marketKey) }));
+  const priceOf = k => seen.has(k) ? seen.get(k).p : null;
+  const changed = keyed.filter(it => seen.has(it.marketKey) && priceOf(it.marketKey) !== it.price)
+    .map(it => ({ id: it.id, path: it.path, name: String(it.name || it.id), old: it.price > 0 ? it.price : null, at: it.updatedAt, p: priceOf(it.marketKey) }));
   const missing = keys.filter(k => !seen.has(k));
 
-  // Each price is added to the item's history. The old reading goes in too, for an item that had a
-  // price but no history yet; one already there isn't added twice.
-  const writes = changed.map(c => ({
-    update: { name: c.path, fields: fields({ price: c.p, updatedAt: now, example: false }) },
-    updateMask: { fieldPaths: ['price', 'updatedAt', 'example'] },
-    updateTransforms: [{ fieldPath: 'hist', appendMissingElements: { values: (c.old && c.at > 0 ? [{ t: c.at, p: c.old }] : []).concat([{ t: now, p: c.p }]).map(value) } }],
-    currentDocument: { exists: true }
-  }));
-  writes.push({ update: { name: DOCS + 'market/status', fields: fields({ at: now, server: server, serverName: serverName, checked: keys.length, changed: changed.length, missing: missing, by: why }) } });
+  // What changed, gathered per item so each is written once.
+  const edits = new Map();
+  const edit = (it, f, add) => { let e = edits.get(it.path); if (!e) edits.set(it.path, e = { f: {}, add: [] }); Object.assign(e.f, f); if (add) e.add.push(add); };
+  // A new price is added to its history. The old reading goes in too, for an item that had a price but
+  // no history yet; one already there isn't added twice.
+  const reading = (field, old, at, p) => ({ fieldPath: field, appendMissingElements: { values: (old > 0 && at > 0 ? [{ t: at, p: old }] : []).concat([{ t: now, p: p }]).map(value) } });
+  for (const c of changed) edit(c, { price: c.p, updatedAt: now, example: false }, reading('hist', c.old, c.at, c.p));
+
+  // How many listings each item has, and had a day earlier, and since when its lowest price and count
+  // have held still, from QuestLog. None listed counts 0.
+  const same = (a, b) => (a == null ? null : a) === (b == null ? null : b);
+  if (here) for (const it of keyed) {
+    const x = here.get(it.marketKey), n = x ? x.n : 0, n24 = x ? x.n24 : null, since = x ? x.since : null;
+    if (!same(n, it.listings) || !same(n24, it.listings24h) || !same(since, it.sameSince)) edit(it, { listings: n, listings24h: n24, sameSince: since });
+  }
+  // The World Market's lowest prices, from QuestLog, each added to the item's World Market history.
+  // An item with none listed there keeps its last price.
+  let wChanged = 0;
+  const wMissing = new Set();
+  if (world) for (const it of keyed) {
+    const x = world.get(it.marketKey);
+    if (!x) { wMissing.add(it.marketKey); if (it.wListings > 0 || it.wSameSince != null) edit(it, { wListings: 0, wSameSince: null }); continue; }
+    if (x.p !== it.world) { edit(it, { world: x.p, worldAt: now, example: false }, reading('wHist', it.world, it.worldAt, x.p)); wChanged++; }
+    if (!same(x.n, it.wListings) || !same(x.since, it.wSameSince)) edit(it, { wListings: x.n, wSameSince: x.since });
+  }
+  const writes = [...edits].map(([path, e]) => Object.assign({ update: { name: path, fields: fields(e.f) }, updateMask: { fieldPaths: Object.keys(e.f) } },
+    e.add.length ? { updateTransforms: e.add } : {}, { currentDocument: { exists: true } }));
+
+  // The check, for the page. A field named in the mask but left out is cleared.
+  const status = { at: now, server: server, serverName: serverName, checked: keys.length, changed: changed.length, missing: missing, by: why, source: source, fellBack: fellBack };
+  const mask = Object.keys(status).concat(['failedAt', 'failed']);
+  if (here) { status.nAt = now; mask.push('nAt'); }
+  if (world) {
+    Object.assign(status, { wAt: now, wName: String(env.QUESTLOG_WORLD_NAME || 'World Market'), wChanged: wChanged, wMissing: [...wMissing] });
+    mask.push('wAt', 'wName', 'wChanged', 'wMissing', 'wFailedAt', 'wFailed');
+  } else if (qlw instanceof Error) {
+    Object.assign(status, { wFailedAt: now, wFailed: qlw.message });
+    mask.push('wFailedAt', 'wFailed');
+  }
+  writes.push({ update: { name: DOCS + 'market/status', fields: fields(status) }, updateMask: { fieldPaths: mask } });
 
   // Alerts: a price that crossed a member's line since the last reading.
   const byId = new Map(changed.map(c => [c.id, c]));
@@ -140,7 +181,8 @@ async function run(env, ctx, why) {
   const sent = await Promise.allSettled(fired.filter(f => f.discord).map(f => discord(f.discord, alertText(f.hits, serverName))));
   const failed = sent.filter(s => s.status === 'rejected' || !s.value.ok).length;
   if (failed) console.error(failed + ' Discord alert(s) didn’t send.');
-  return { at: now, checked: keys.length, changed: changed.length, missing: missing.length, alerts: fired.reduce((n, f) => n + f.hits.length, 0) };
+  return { at: now, checked: keys.length, changed: changed.length, missing: missing.length, alerts: fired.reduce((n, f) => n + f.hits.length, 0),
+    source: source, worldChanged: world ? wChanged : null, worldFailed: qlw instanceof Error ? qlw.message : null };
 }
 
 function alertText(hits, serverName) {
@@ -171,13 +213,7 @@ async function askGroup(env, ctx, server, keys, fresh, plan) {
 // answer from the last 30 minutes.
 async function askMarket(env, ctx, server, keys, fresh, plan) {
   const path = 'items?server=' + encodeURIComponent(server) + '&keys=' + keys.slice().sort().join(',');
-  const id = await sha(path), kv = env.PRICES;
-  let body = null;
-  if (!fresh) {
-    const kept = memo.get(id);
-    body = kept && kept.until > Date.now() ? kept.body : null;
-    if (!body && kv) body = await kv.get(id);
-  }
+  let body = fresh ? null : await kept(env, path);
   if (body) return JSON.parse(body);
   if (plan.left-- <= 0) throw marketError('aion2.exchange couldn’t answer after ' + ASKS + ' tries.');
   let r;
@@ -199,12 +235,72 @@ async function askMarket(env, ctx, server, keys, fresh, plan) {
   body = await r.text();
   let d;
   try { d = JSON.parse(body); } catch (_) { throw marketError('aion2.exchange sent something other than prices.'); }
-  if (kv) ctx.waitUntil(kv.put(id, body, { expirationTtl: KEEP }));
-  if (memo.size > 200) memo.clear();
-  memo.set(id, { body: body, until: Date.now() + KEEP * 1000 });
+  await keep(env, ctx, path, body);
   return d;
 }
 function marketError(message, busy) { const e = new Error(message); e.market = true; e.busy = !!busy; return e; }
+
+// aion2.exchange's price and listing count for each key it has listed, asked in groups.
+async function exchangePrices(env, ctx, server, keys, fresh) {
+  const seen = new Map(), plan = { size: BATCH, left: ASKS };
+  for (let i = 0; i < keys.length;) {
+    const part = keys.slice(i, i + plan.size);
+    for (const d of await askGroup(env, ctx, server, part, fresh, plan)) {
+      for (const x of d && Array.isArray(d.items) ? d.items : []) {
+        const k = String(x && x.item_key), p = Number(x && x.price);
+        if (KEY.test(k) && x.listed !== false && p > 0 && isFinite(p)) seen.set(k, { p: p, n: count(x.listings) });
+      }
+    }
+    i += part.length;
+  }
+  return seen;
+}
+
+// QuestLog's lowest price and listing count for every item listed on one of its markets (a server, or a
+// region's World Market for one faction), in one request. The hourly check always asks; a member's
+// check may use an answer from the last 30 minutes.
+async function askQuestlog(env, ctx, market, fresh) {
+  const url = QUESTLOG + encodeURIComponent(JSON.stringify({ serverId: Number(market) }));
+  const was = fresh ? null : await kept(env, url);
+  let body = was;
+  if (!body) {
+    let r;
+    try { r = await fetch(url, { headers: { 'User-Agent': UA, 'Accept': 'application/json' }, signal: AbortSignal.timeout(WAIT) }); }
+    catch (e) { throw marketError('QuestLog didn’t answer' + (e && e.name === 'TimeoutError' ? ' within ' + WAIT / 1000 + ' seconds' : ' (' + (e && e.message) + ')') + '.'); }
+    if (!r.ok) {
+      console.error('QuestLog answered ' + r.status + ' for market ' + market + ': ' + (await r.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 300));
+      throw marketError(r.status === 429 ? 'QuestLog says it has had too many requests (429).' : 'QuestLog answered ' + r.status + (r.status >= 500 ? ': the site is down or overloaded right now' : '') + '.');
+    }
+    body = await r.text();
+  }
+  let rows = null;
+  try { const d = JSON.parse(body), x = d && d.result && d.result.data; rows = Array.isArray(x) ? x : x && Array.isArray(x.json) ? x.json : null; } catch (_) {}
+  if (!rows) throw marketError('QuestLog sent something other than prices.');
+  const got = new Map();
+  for (const x of rows) {
+    const k = String(x && x.itemId), p = Number(x && x.minPrice), n = count(x && x.listings);
+    // Its updatedAt is when the lowest price or the listing count last changed: an item whose market has
+    // sat still keeps an old one. An item with nothing listed isn't in the list at all.
+    if (KEY.test(k) && p > 0 && isFinite(p) && n !== 0) got.set(k, { p: p, n: n, n24: count(x.listings24h), since: Date.parse(x.updatedAt) || null });
+  }
+  if (!got.size) throw marketError('QuestLog listed no prices.');
+  if (!was) await keep(env, ctx, url, body);
+  return got;
+}
+function count(n) { return typeof n === 'number' && isFinite(n) && n >= 0 ? Math.round(n) : null; }
+
+// Answers kept for KEEP seconds, in the PRICES store when there is one, for members asking close together.
+async function kept(env, ask) {
+  const id = await sha(ask), m = memo.get(id);
+  if (m && m.until > Date.now()) return m.body;
+  return env.PRICES ? await env.PRICES.get(id) : null;
+}
+async function keep(env, ctx, ask, body) {
+  const id = await sha(ask);
+  if (env.PRICES) ctx.waitUntil(env.PRICES.put(id, body, { expirationTtl: KEEP }));
+  if (memo.size > 200) memo.clear();
+  memo.set(id, { body: body, until: Date.now() + KEEP * 1000 });
+}
 
 // A member is someone signed in whose own record in `members` they can read. Firestore checks the
 // token's signature and the access rules. A token that passed is remembered until it expires.

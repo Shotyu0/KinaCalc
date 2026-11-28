@@ -92,6 +92,7 @@ p { margin: 0; }
 .wrap { padding-block: 24px 40px; display: grid; gap: 20px; }
 .foot { border-top: 1px solid var(--line); }
 .foot-in { padding-block: 16px 28px; font-size: 13px; color: var(--ink-3); display: flex; flex-wrap: wrap; gap: 6px 20px; }
+.foot-in a { color: var(--aether); text-underline-offset: 2px; }
 
 /* Shared pieces */
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px; display: grid; gap: 14px; min-width: 0; }

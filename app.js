@@ -70,7 +70,7 @@
 
   let CAT = { recipes: [] }; // loaded from data/catalog.json at startup
   let GATHERABLE = null; // names of materials gathered from nodes, from data/gather-icons.json
-  const BUILD = '2026-11-23a'; // shown in the footer, to tell which version a browser is running
+  const BUILD = '2026-11-28a'; // shown in the footer, to tell which version a browser is running
 
   /* ---------- formatting ---------- */
   const NF0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
@@ -493,6 +493,9 @@
     // Its lowest price on the World Market, which pools every server of your faction and region, and
     // that price's history. Left off until someone enters one.
     if (num(x.world) > 0 || readHist(x.wHist).length) Object.assign(it, { world: num(x.world) > 0 ? num(x.world) : null, worldAt: num(x.worldAt), wHist: readHist(x.wHist).slice(-HIST_MAX) });
+    // How many listings it has on the market and on the World Market, how many it had a day earlier, and
+    // since when each market has held still (its lowest price and count unchanged), all from the relay.
+    for (const f of ['listings', 'listings24h', 'sameSince', 'wListings', 'wSameSince']) if (num(x[f]) != null && num(x[f]) >= 0) it[f] = num(x[f]);
     return it;
   }
   function readRecipe(id, x) {
@@ -615,8 +618,8 @@
     if (!wi || !(wi.latest > 0)) return '';
     const label = esc(prefix || '') + 'World ';
     if (wi.doubtful) return '<div class="sub stale" title="' + esc('World Market: ' + doubtText(wi.latest, wi.usual)) + '">' + label + k(wi.latest) + ' looks wrong · using ' + k(wi.usual) + '</div>';
-    const at = num(it.worldAt), old = !at || Date.now() - at > DAY;
-    return '<div class="sub' + (old ? ' stale' : '') + '" title="' + esc(at ? 'World Market price from ' + when(at) : 'No date recorded') + '">' + label + k(wi.latest) + ' · ' + (at ? ago(at) : 'no date') + '</div>';
+    const at = worldSeenAt(it), old = !at || Date.now() - at > DAY;
+    return '<div class="sub' + (old ? ' stale' : '') + '" title="' + esc(at ? 'World Market price as of ' + when(at) : 'No date recorded') + '">' + label + k(wi.latest) + ' · ' + (at ? ago(at) : 'no date') + '</div>';
   }
   function doubtText(price, usual) {
     return price >= usual ? NF0.format(Math.round(price / usual)) + '× its usual ' + k(usual) : 'under a fifth of its usual ' + k(usual);
@@ -659,7 +662,7 @@
   }
   function priceAge(id, world) {
     const it = getItem(id);
-    const seen = world ? it && num(it.worldAt) : seenAt(it);
+    const seen = world ? worldSeenAt(it) : seenAt(it);
     if (!seen) return '';
     return '<div class="sub' + (Date.now() - seen > DAY ? ' stale' : '') + '">' + ago(seen) + '</div>';
   }
@@ -675,7 +678,53 @@
     const wi = worldInfo(it);
     if (!wi || !(wi.latest > 0)) return '';
     return '<dt>World Market price</dt><dd>' + k(wi.latest) + '</dd>' + (wi.doubtful ? '<dd class="why">That’s ' + esc(doubtText(wi.latest, wi.usual)) + ' there, so the math uses ' + k(wi.usual) + '.</dd>' : '') +
-      '<dd class="why">' + (num(it.worldAt) ? 'Entered ' + esc(ago(it.worldAt)) + '. ' : '') + 'Its sales fee is ' + k(S.settings.worldTax) + '%, so selling there only pays when it lists for clearly more.</dd>';
+      '<dd class="why">' + (worldSeenAt(it) ? (worldSeenAt(it) > num(it.worldAt) || worldFed() && it.marketKey ? 'Checked ' : 'Entered ') + esc(ago(worldSeenAt(it))) + '. ' : '') + 'Its sales fee is ' + k(S.settings.worldTax) + '%, so selling there only pays when it lists for clearly more.</dd>' +
+      sellDT(it, true);
+  }
+  // How an item is selling on one market, from the relay's listing counts. A listing that disappears was
+  // bought, taken down or expired: there's no telling which. Selling: its listings fell by a quarter or
+  // more in a day. Sitting: nothing about its market (lowest price or count) has changed in 3 days.
+  // Null when the counts are missing or older than 3 hours.
+  const SITTING_DAYS = 3;
+  function sellInfo(it, world) {
+    const m = S.market, read = m && (world ? m.wAt : m.nAt);
+    if (!it || it.bound || !it.marketKey || !read || Date.now() - read > 3 * 36e5) return null;
+    const n = num(world ? it.wListings : it.listings);
+    if (n == null) return null;
+    const n24 = world ? null : num(it.listings24h), since = num(world ? it.wSameSince : it.sameSince);
+    const still = n > 0 && since ? Date.now() - since : 0;
+    const state = n24 >= 3 && n24 - n >= 2 && (n24 - n) / n24 >= 0.25 ? 'selling' : still >= SITTING_DAYS * DAY ? 'sitting' : '';
+    return { n: n, n24: n24, since: since, still: still, state: state };
+  }
+  function sellTxt(s) {
+    if (!s) return '';
+    if (!s.n) return 'None listed';
+    return plural(s.n, 'listing') + (s.n24 != null ? ' (' + NF0.format(s.n24) + ' a day ago)' : '');
+  }
+  function sellWhy(s, name) {
+    if (!s || !s.state) return '';
+    return s.state === 'selling' ? 'Listings fell from ' + NF0.format(s.n24) + ' to ' + NF0.format(s.n) + ' in a day, so ' + name + ' is being bought (some may have been taken down).'
+      : 'Its lowest price and listing count haven’t changed in ' + plural(Math.floor(s.still / DAY), 'day') + ': nobody has bought one or listed a new one, so ' + name + ' may sit a while before it sells.';
+  }
+  // A tag for an item that's selling or sitting, or null.
+  function sellTag(it, world) {
+    const s = sellInfo(it, world);
+    if (!s || !s.state) return null;
+    return s.state === 'selling' ? ['gather', world ? 'Selling on the World Market' : 'Selling'] : ['warn', 'Sitting ' + Math.floor(s.still / DAY) + ' days' + (world ? ' on the World Market' : '')];
+  }
+  // The listing count under a price on the Prices tab.
+  function listSub(it, world) {
+    const s = sellInfo(it, world);
+    if (!s) return '';
+    const title = (world ? 'On the World Market' : 'On the market') + (s.n && s.since ? ': lowest price and count unchanged since ' + when(s.since) : '');
+    return '<div class="sub" title="' + esc(title) + '">' + (s.n ? NF0.format(s.n) + ' listed' + (s.n24 != null && s.n24 !== s.n ? ', ' + NF0.format(s.n24) + ' a day ago' : '') : 'none listed') + '</div>';
+  }
+  // The listing count in a breakdown, with a note when the item is selling or sitting.
+  function sellDT(it, world) {
+    const s = sellInfo(it, world);
+    if (!s) return '';
+    const why = sellWhy(s, it.name);
+    return '<dt>Listed' + (world ? ' on the World Market' : '') + '</dt><dd>' + esc(sellTxt(s)) + '</dd>' + (why ? '<dd class="why' + (s.state === 'sitting' ? ' warn-text' : '') + '">' + esc(why) + '</dd>' : '');
   }
   // Which of a craft's results sell on the World Market, where they net more even after its higher fee.
   function soldWhereHTML(rc, outName, comboName) {
@@ -754,7 +803,7 @@
   }
 
   // The World Market price, kept beside the server's with its own history and the same doubt check.
-  // Nothing refreshes it yet, so it's as current as the last time someone entered or pasted it.
+  // The relay refreshes it every hour from QuestLog for items with a market key; it can also be typed in.
   function wHistOf(it) {
     const h = it && Array.isArray(it.wHist) ? it.wHist : [];
     if (h.length) return h;
@@ -1223,6 +1272,7 @@
     if (pd.ignored.length) f.push(['warn', 'Ignoring a doubtful price']);
     if (out && out.bound) f.push(['', 'Ingredient only']);
     else if (b.outNet == null) f.push(['warn', 'Needs sell price']);
+    else { const st = sellTag(out, !!(rcOf(row[UI.metric]) || {}).outWorld); if (st) f.push(st); }
     if (b.comboMissing) f.push(['warn', 'Needs combo item price']);
     if (g.missing.length) f.push(['warn', plural(g.missing.length, 'material price') + ' missing']);
     else if (b.missing.length) f.push(['', 'Gathered mats need prices for buy-all']);
@@ -1428,7 +1478,7 @@
       '<dt>Cost per Splendent</dt><dd><strong>' + k(ch.cost) + '</strong></dd>' +
       (ch.cost < 0 ? '<dd class="why">Below zero: the normal items sell for more than the materials, so the Splendent is a bonus.</dd>' : '') + '</dl>';
     const users = C.rows.filter(x => x.r.mats.some(m => m.item === row.r.output));
-    let use = '<dl class="kv"><dt>Listed price</dt><dd>' + (out && num(out.price) > 0 ? k(out.price) : '—') + '</dd>' + worldDT(out) +
+    let use = '<dl class="kv"><dt>Listed price</dt><dd>' + (out && num(out.price) > 0 ? k(out.price) : '—') + '</dd>' + sellDT(out) + worldDT(out) +
       '<dt>Sold' + (ch.outWorld ? ' on the World Market' : '') + ', after the fee</dt><dd>' + k(ch.outNet) + '</dd>' +
       '<dt>Profit per Splendent sold</dt><dd class="' + tone(ch.profit) + '"><strong>' + sk(ch.profit) + '</strong></dd></dl>';
     if (users.length) {
@@ -1483,7 +1533,7 @@
     odds += '</dl><dl class="kv tot"><dt>Cost per item made</dt><dd>' + (covered ? '0' : k(rc.unitCost)) + '</dd>' +
       '<dt>Break-even list price' + (rc.outWorld && !covered ? ' on the World Market' : '') + '</dt><dd>' + (covered ? 'Any price' : k(rc.breakEven)) + '</dd>' +
       (covered ? '<dd class="why">The ' + esc(comboName) + ' procs alone earn more than the materials cost, so the normal items are pure profit at any price.</dd>' : '') +
-      '<dt>Current list price</dt><dd>' + (out && num(out.price) > 0 ? k(out.price) : '—') + '</dd>' + listDoubtHTML(row, out) + worldDT(out) +
+      '<dt>Current list price</dt><dd>' + (out && num(out.price) > 0 ? k(out.price) : '—') + '</dd>' + listDoubtHTML(row, out) + sellDT(out) + worldDT(out) +
       (out && histOf(out).length > 1 ? '<dd class="why" style="text-align:right">' + sparkHTML(out) + '</dd>' : '') + '</dl>';
 
     let rowsHTML = treeRows(E, r.mats, rc, 0, 1, new Set([r.id]));
@@ -1797,6 +1847,11 @@
     const byName = (a, b) => a.name.localeCompare(b.name);
     if (UI.priceSort === 'stale') items.sort((a, b) => ((seenAt(a) || 0) - (seenAt(b) || 0)) || byName(a, b));
     else if (UI.priceSort === 'used') items.sort((a, b) => ((used.get(b.id) || 0) - (used.get(a.id) || 0)) || byName(a, b));
+    else if (UI.priceSort === 'selling') {
+      // The share of a day's listings that went, for items that had at least 3; the rest after, A–Z.
+      const gone = new Map(items.map(it => { const s = sellInfo(it); return [it.id, s && s.n24 >= 3 ? (s.n24 - s.n) / s.n24 : -Infinity]; }));
+      items.sort((a, b) => (gone.get(b.id) - gone.get(a.id)) || byName(a, b));
+    }
     else items.sort(byName);
     return items;
   }
@@ -1808,7 +1863,10 @@
     const now = Date.now();
     let h = '<div class="toolbar"><h2 class="sec-h">Prices</h2><div class="row-gap"><button class="btn" data-act="tab" data-tab="shots">Paste a price list</button></div></div>' +
       '<p class="help">Enter the lowest market price for one unit. You can type 1520, 1,520 or 1.5k. Every price you enter or paste is kept, so click an item’s name to see its price history. Tick <strong>Gather</strong> for anything you collect yourself' + (S.uid ? ' (your own list: friends tick theirs)' : '') + ', and <strong>Bound</strong> for items that can’t be sold on the market. Use the NPC column for vendor-only materials.</p>' +
-      '<p class="help">The <strong>World price</strong> is the item’s lowest price on the World Market, which trades with every server of your faction and region. Where an item has both, the math buys from whichever is cheaper and sells on whichever leaves more after fees: the World Market’s sales fee is ' + k(S.settings.worldTax) + '%, so selling there only pays when it lists for about ' + worldEdge() + '% more. World prices don’t refresh themselves yet, so enter or paste them when you check.</p>';
+      '<p class="help">The <strong>World price</strong> is the item’s lowest price on the World Market, which trades with every server of your faction and region. Where an item has both, the math buys from whichever is cheaper and sells on whichever leaves more after fees: the World Market’s sales fee is ' + k(S.settings.worldTax) + '%, so selling there only pays when it lists for about ' + worldEdge() + '% more. ' +
+      (worldFed() ? 'World prices refresh themselves every hour from QuestLog (' + esc(S.market.wName) + ') for each item whose market key is known; for any other item, enter or paste one when you check.</p>'
+        : 'World prices don’t refresh themselves yet, so enter or paste them when you check.</p>') +
+      (S.market && S.market.nAt ? '<p class="help">Under each price is how many listings the item has, and had a day earlier. <strong>Selling</strong> means a quarter or more of its listings went in a day, so people are buying it (some may have been taken down: there’s no telling which). <strong>Sitting</strong> means its lowest price and listing count haven’t changed in ' + SITTING_DAYS + ' days or more, so nobody is buying. Sort by <strong>Selling fastest</strong> to see what moves.</p>' : '');
     h += alertsPanel();
     markHitsSeen();
     h += '<section class="panel"><div class="addrow">' +
@@ -1819,7 +1877,7 @@
     const seg = (act, cur, opts) => '<div class="seg" role="group">' + opts.map(([v, l]) => '<button data-act="' + act + '" data-v="' + v + '" aria-pressed="' + (cur === v) + '">' + l + '</button>').join('') + '</div>';
     h += '<div class="filters"><div class="field"><label for="pq">Search</label><input id="pq" class="in" type="search" value="' + esc(UI.priceQuery) + '" data-inp="pq" placeholder="Filter items" autocomplete="off"></div>' +
       seg('price-filter', UI.priceFilter, [['all', 'All'], ['needs', 'Needs a price'], ['priced', 'Priced'], ['gather', 'Gathered'], ['out', 'Not in game']]) +
-      seg('price-sort', UI.priceSort, [['name', 'A–Z'], ['used', 'Most used'], ['stale', 'Oldest price first']]) + '</div>';
+      seg('price-sort', UI.priceSort, [['name', 'A–Z'], ['used', 'Most used'], ['stale', 'Oldest price first']].concat(S.market && S.market.nAt ? [['selling', 'Selling fastest']] : [])) + '</div>';
     if (UI.priceQuery.trim() && items.length) {
       const allOut = items.every(it => it.unavailable);
       h += '<div class="row-gap"><button class="btn small" data-act="bulk-out" data-v="' + (allOut ? '0' : '1') + '">' + (allOut ? 'Mark these ' + plural(items.length, 'item') + ' as in the game' : 'Mark these ' + plural(items.length, 'item') + ' as not in the game') + '</button>' +
@@ -1838,12 +1896,13 @@
       const better = worldBetter(it);
       if (better) tags.push(['world', better]);
       else if (needsPrice(it, used, C, outputs)) tags.push(['warn', 'Needs a price']);
+      for (const st of [sellTag(it), sellTag(it, true)]) if (st) tags.push(st);
       if (S.alerts && S.alerts.rules[it.id]) tags.push(['', 'Alert at ' + alertText(S.alerts.rules[it.id])]);
       const seen = seenAt(it), isStale = num(it.price) > 0 && seen && now - seen > DAY;
       const deletable = !it.virtual && !u && !reg().catNames.has(norm(it.name));
       h += '<tr class="' + (open ? 'open' : '') + '"><td class="c-name"><button class="name-btn" data-act="price-open" data-id="' + id + '" aria-expanded="' + open + '">' + nameHTML(it.id) + '</button>' + tagList(tags) + '</td>' +
-        '<td class="num"><input id="pi-price-' + id + '" class="cell-in num" inputmode="decimal" value="' + (it.price != null ? NF0.format(it.price) : '') + '" placeholder="—" data-chg="item" data-id="' + id + '" data-f="price" aria-label="Market price of ' + esc(it.name) + '"' + (it.bound ? ' disabled title="Bound items can’t be sold on the market"' : '') + '></td>' +
-        '<td class="num"><input id="pi-world-' + id + '" class="cell-in num" inputmode="decimal" value="' + (num(it.world) > 0 ? NF0.format(it.world) : '') + '" placeholder="—" data-chg="item" data-id="' + id + '" data-f="world" aria-label="World Market price of ' + esc(it.name) + '"' + (it.bound ? ' disabled title="Bound items can’t be sold on the market"' : '') + '>' + (num(it.world) > 0 ? priceAge(it.id, true) : '') + '</td>' +
+        '<td class="num"><input id="pi-price-' + id + '" class="cell-in num" inputmode="decimal" value="' + (it.price != null ? NF0.format(it.price) : '') + '" placeholder="—" data-chg="item" data-id="' + id + '" data-f="price" aria-label="Market price of ' + esc(it.name) + '"' + (it.bound ? ' disabled title="Bound items can’t be sold on the market"' : '') + '>' + listSub(it) + '</td>' +
+        '<td class="num"><input id="pi-world-' + id + '" class="cell-in num" inputmode="decimal" value="' + (num(it.world) > 0 ? NF0.format(it.world) : '') + '" placeholder="—" data-chg="item" data-id="' + id + '" data-f="world" aria-label="World Market price of ' + esc(it.name) + '"' + (it.bound ? ' disabled title="Bound items can’t be sold on the market"' : '') + '>' + (num(it.world) > 0 ? priceAge(it.id, true) : '') + listSub(it, true) + '</td>' +
         '<td>' + sparkHTML(it) + '</td>' +
         '<td class="num"><input id="pi-vendor-' + id + '" class="cell-in num" inputmode="decimal" value="' + (it.vendor != null ? NF0.format(it.vendor) : '') + '" placeholder="—" data-chg="item" data-id="' + id + '" data-f="vendor" aria-label="NPC price of ' + esc(it.name) + '"></td>' +
         '<td class="c"><input type="checkbox" class="check" id="pi-gather-' + id + '" data-chg="item" data-id="' + id + '" data-f="gather"' + (isGathered(it) ? ' checked' : '') + ' aria-label="I gather ' + esc(it.name) + '"></td>' +
@@ -1888,7 +1947,7 @@
         const c = prev ? (x.p - prev.p) / prev.p : null;
         return '<tr><td>' + esc(when(x.t)) + '</td><td class="num">' + k(x.p) + '</td><td class="num">' + (c == null ? '—' : (c >= 0 ? '+' : '−') + Math.abs(c * 100).toFixed(1) + '%') + '</td>' +
           '<td><button class="btn small ghost" data-act="hist-del" data-w="1" data-id="' + esc(it.id) + '" data-t="' + x.t + '" aria-label="Delete the World Market reading from ' + esc(when(x.t)) + '">Delete</button></td></tr>';
-      }).join('') + '</tbody></table></div><p class="note">World Market prices are entered or pasted by hand for now. Delete a reading that was entered wrong.</p></details>';
+      }).join('') + '</tbody></table></div><p class="note">' + (worldFed() && it.marketKey ? 'These refresh every hour from QuestLog. ' : 'World Market prices for this item are entered or pasted by hand. ') + 'Delete a reading that was entered wrong.</p></details>';
   }
   // How much more an item must list for on the World Market to leave more after its higher fee, in percent.
   function worldEdge() {
@@ -2012,8 +2071,21 @@
   }
   function readMarket(x) {
     if (!x || !(num(x.at) > 0 || num(x.failedAt) > 0)) return null;
+    const text = v => typeof v === 'string' ? v.slice(0, 300) : '';
     return { at: num(x.at) || 0, server: String(x.serverName || x.server || ''), checked: num(x.checked) || 0, changed: num(x.changed) || 0, missing: new Set(Array.isArray(x.missing) ? x.missing.map(String) : []),
-      failedAt: num(x.failedAt) || 0, failed: typeof x.failed === 'string' ? x.failed.slice(0, 200) : '' };
+      failedAt: num(x.failedAt) || 0, failed: text(x.failed),
+      // Where the server's prices came from, and why, when it wasn't aion2.exchange.
+      source: text(x.source) || 'aion2.exchange', fellBack: text(x.fellBack),
+      // When listing counts and World Market prices were last read from QuestLog.
+      nAt: num(x.nAt) || 0, wAt: num(x.wAt) || 0, wName: text(x.wName) || 'World Market', wChanged: num(x.wChanged) || 0,
+      wMissing: new Set(Array.isArray(x.wMissing) ? x.wMissing.map(String) : []), wFailedAt: num(x.wFailedAt) || 0, wFailed: text(x.wFailed) };
+  }
+  // Whether the relay fills in World Market prices: it has read them within the last day.
+  function worldFed() { const m = S.market; return !!(m && m.wAt && Date.now() - m.wAt < DAY); }
+  // When an item's World Market price was last known to be right, as seenAt is for the server's.
+  function worldSeenAt(it) {
+    const t = it && num(it.worldAt) || 0, m = S.market;
+    return it && it.marketKey && m && m.wAt > t && num(it.world) > 0 && !it.unavailable && !m.wMissing.has(it.marketKey) ? m.wAt : t || null;
   }
   // When an item's price was last known to be right: the hourly check confirms one it found unchanged.
   function seenAt(it) {
@@ -2023,15 +2095,19 @@
   function keyedItems() { return [...S.items.values()].filter(it => it.marketKey && !it.unavailable); }
   function marketPanel() {
     if (!relayUrl()) return '';
-    let h = '<section class="panel"><h3 class="sec-h">Market prices from aion2.exchange</h3>';
-    if (S.mode !== 'db') return h + '<p class="help">Sign in to the shared price book: its prices refresh themselves from aion2.exchange every hour.</p></section>';
+    let h = '<section class="panel"><h3 class="sec-h">Market prices from aion2.exchange and QuestLog</h3>';
+    if (S.mode !== 'db') return h + '<p class="help">Sign in to the shared price book: its prices refresh themselves every hour.</p></section>';
     const m = S.market, have = keyedItems().length;
     h += '<p class="help">Prices refresh themselves every hour' + (m && m.server ? ' from ' + esc(m.server) + '’s market' : '') + ' for each item whose aion2.exchange key is known: ' + NF0.format(have) + ' of ' + plural(S.items.size, 'item') + ' so far. ' +
-      'A key is learned when you paste a table from aion2.exchange below. Every price is saved; one far from its usual price is labelled <strong>Doubtful price</strong> and the math keeps using the usual one.</p>' +
+      'A key is learned when you paste a table from aion2.exchange below. Every price is saved; one far from its usual price is labelled <strong>Doubtful price</strong> and the math keeps using the usual one.' +
+      (m && (m.wAt || m.nAt) ? ' World Market prices and listing counts come from QuestLog, and when aion2.exchange can’t answer, the server’s prices do too.' : '') + '</p>' +
       '<div class="row-gap"><span class="help">' + (m && m.at ? 'Last checked ' + esc(ago(m.at)) + ': ' + plural(m.changed, 'price') + ' changed' + (m.missing.size ? ', ' + plural(m.missing.size, 'item') + ' with no listings' : '') + '.'
         : m ? 'No check has worked yet.' : S.marketState === 'denied' ? 'Publish the latest firestore.rules to see when prices were last checked.' : 'No check has run yet.') + '</span>' +
       '<button class="btn" data-act="mkt-refresh"' + (MKT.asking || !have ? ' disabled' : '') + '>' + (MKT.asking ? 'Checking…' : 'Check now') + '</button></div>';
     if (m && m.failedAt > m.at && !MKT.note) h += '<p class="help warn-text" role="status">The check ' + esc(ago(m.failedAt)) + ' didn’t get prices: ' + esc(m.failed || 'aion2.exchange didn’t answer.') + ' Prices stay as they were, and it tries again at 20 past every hour.</p>';
+    else if (m && m.source === 'QuestLog' && m.at) h += '<p class="help" role="status">aion2.exchange couldn’t answer at the last check' + (m.fellBack ? ' (' + esc(m.fellBack.replace(/\.$/, '')) + ')' : '') + ', so ' + esc(m.server || 'the server') + '’s prices came from QuestLog.</p>';
+    if (m && m.wAt) h += '<p class="help">World Market: ' + esc(m.wName) + ', checked ' + esc(ago(m.wAt)) + ': ' + plural(m.wChanged, 'price') + ' changed' + (m.wMissing.size ? ', ' + plural(m.wMissing.size, 'item') + ' not listed there' : '') + '.</p>';
+    if (m && m.wFailedAt > m.wAt) h += '<p class="help warn-text" role="status">The World Market couldn’t be read ' + esc(ago(m.wFailedAt)) + ': ' + esc(m.wFailed || 'QuestLog didn’t answer.') + ' Its prices stay as they were.</p>';
     if (MKT.note) h += '<p class="help" role="status">' + esc(MKT.note) + '</p>';
     return h + '</section>';
   }
@@ -2042,7 +2118,8 @@
       const d = await relayPost('/refresh');
       MKT.note = d.skipped && d.failed ? 'Couldn’t check: ' + d.failed + ' That was ' + ago(d.failedAt) + ', so the relay is giving aion2.exchange a few minutes before asking again.'
         : d.skipped ? 'Prices were checked ' + ago(d.at) + ', so they’re current. A check can be asked for every 10 minutes.'
-        : 'Checked ' + plural(d.checked, 'item') + ': ' + plural(d.changed, 'price') + ' changed' + (d.missing ? ', ' + plural(d.missing, 'item') + ' had no listings' : '') + '.' + (d.alerts ? ' ' + plural(d.alerts, 'price alert') + ' went off.' : '');
+        : 'Checked ' + plural(d.checked, 'item') + (d.source === 'QuestLog' ? ' on QuestLog, since aion2.exchange couldn’t answer' : '') + ': ' + plural(d.changed, 'price') + ' changed' + (d.missing ? ', ' + plural(d.missing, 'item') + ' had no listings' : '') + '.' +
+          (d.worldChanged != null ? ' World Market: ' + plural(d.worldChanged, 'price') + ' changed.' : d.worldFailed ? ' The World Market couldn’t be read: ' + d.worldFailed : '') + (d.alerts ? ' ' + plural(d.alerts, 'price alert') + ' went off.' : '');
     } catch (e) { MKT.note = 'Couldn’t check: ' + e.message; }
     MKT.asking = false; render();
   }
@@ -4162,6 +4239,9 @@
       s.textContent = 'Recipes: AION2 Hub, Global client' + (CAT.built ? ' (read ' + CAT.built + ')' : '') + '.';
       foot.appendChild(s);
     }
+    const mk = document.createElement('span');
+    mk.innerHTML = 'Market prices: <a href="https://aion2.exchange/" target="_blank" rel="noopener">aion2.exchange</a> and <a href="https://questlog.gg/aion-2/en/auction-house" target="_blank" rel="noopener">QuestLog</a>.';
+    foot.appendChild(mk);
     const v = document.createElement('span');
     v.textContent = 'Version ' + BUILD + (CAT.recipes.length ? '' : ' · recipe list not loaded');
     foot.appendChild(v);
